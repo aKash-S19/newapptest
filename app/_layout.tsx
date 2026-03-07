@@ -9,7 +9,6 @@ import {
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import 'expo-crypto';
 import { Stack, useRouter } from 'expo-router';
-import * as SecureStore from 'expo-secure-store';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import * as SystemUI from 'expo-system-ui';
@@ -20,13 +19,12 @@ import 'react-native-reanimated';
 import { AuthProvider } from '@/contexts/AuthContext';
 import { SettingsProvider, useSettings } from '@/contexts/SettingsContext';
 import { addNotificationResponseListener, requestNotificationPermission } from '@/lib/notifications';
-import { ONBOARDING_KEY } from './onboarding';
 
 // Keep the splash screen up while fonts load
 SplashScreen.preventAutoHideAsync();
 
 export const unstable_settings = {
-  initialRouteName: 'onboarding',
+  initialRouteName: 'index',
 };
 
 // Custom nav themes — override background/card so the navigator canvas
@@ -69,6 +67,7 @@ function AppShell() {
           detachPreviousScreen: false,
         }}
       >
+        <Stack.Screen name="index"      options={{ headerShown: false, animation: 'none' }} />
         <Stack.Screen name="onboarding" options={{ headerShown: false, animation: 'fade' }} />
         <Stack.Screen name="auth"     options={{ headerShown: false }} />
         <Stack.Screen name="(tabs)"   options={{ headerShown: false }} />
@@ -118,11 +117,6 @@ export default function RootLayout() {
   useEffect(() => {
     if (!fontsLoaded) return;
     SplashScreen.hideAsync();
-    // Redirect returning users past onboarding
-    SecureStore.getItemAsync(ONBOARDING_KEY).then((val) => {
-      if (val === '1') router.replace('/auth');
-      // else stay on onboarding (default initial route)
-    });
   }, [fontsLoaded]);
 
   // Ask for push permission once on first launch and wire up tap-to-open-chat
