@@ -9,10 +9,9 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
-  const { isAuthenticated } = useAuth();
+  const { status } = useAuth();
 
-  // Guard: if not authenticated, send back to auth screen
-  if (!isAuthenticated) {
+  if (status === 'unauthenticated') {
     return <Redirect href="/auth" />;
   }
 
@@ -26,15 +25,15 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Home',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="house.fill" color={color} />,
+          title: 'Chats',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="bubble.left.and.bubble.right.fill" color={color} />,
         }}
       />
       <Tabs.Screen
-        name="explore"
+        name="friends"
         options={{
-          title: 'Explore',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="paperplane.fill" color={color} />,
+          title: 'Add Friends',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="person.badge.plus.fill" color={color} />,
         }}
       />
     </Tabs>

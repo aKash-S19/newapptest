@@ -1,43 +1,50 @@
-// ─── Supabase project config ─────────────────────────────────────────────────
-const SUPABASE_URL  = 'https://roqqrtbohtqadmkhgffr.supabase.co';
-const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJvcXFydGJvaHRxYWRta2hnZmZyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE0Mjk1OTQsImV4cCI6MjA4NzAwNTU5NH0.ZQgXA6cp1m3HMp9ENsEmuF_HsKYgCWb-nfM6FyoD-Pc';
+import Constants from 'expo-constants';
+import { createClient } from '@supabase/supabase-js';
+
+// ─── Config (injected via app.config.js → expo-constants) ────────────────────
+const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
+
+const SUPABASE_URL  = extra.supabaseUrl  ?? 'https://roqqrtbohtqadmkhgffr.supabase.co';
+const SUPABASE_ANON = extra.supabaseAnonKey ?? '';
 const FUNCTIONS_URL = `${SUPABASE_URL}/functions/v1`;
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-export type AuthAction = 'register' | 'login';
+// ─── Supabase JS client (for realtime, etc.) ───────────────────────────
+export const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON, {
+  auth: { persistSession: false },
+  realtime: { params: { eventsPerSecond: 10 } },
+});
 
-export interface AuthPayload {
-  action:   AuthAction;
-  username: string;
-  emojiKey: string[];
-}
-
-export interface AuthResult {
-  success: boolean;
-  action:  AuthAction;
-  user:    { id: string; username: string; created_at: string };
-}
-
+// ─── Generic caller ───────────────────────────────────────────────────────────
 /**
  * Call the Supabase `auth` edge function via plain fetch.
- * No library needed — avoids all React Native polyfill issues.
+ * Accepts any action payload — type safety lives in AuthContext.
  */
-export async function callAuthFunction(payload: AuthPayload): Promise<AuthResult> {
-  const response = await fetch(`${FUNCTIONS_URL}/auth`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'apikey': SUPABASE_ANON,
-      'Authorization': `Bearer ${SUPABASE_ANON}`,
-    },
-    body: JSON.stringify(payload),
-  });
+export async function callAuthFunction(payload: Record<string, unknown>): Promise<any> {
+  let response: Response;
+  try {
+    response = await fetch(`${FUNCTIONS_URL}/auth`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'apikey':        SUPABASE_ANON,
+        'Authorization': `Bearer ${SUPABASE_ANON}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    throw new Error('Network error — check your internet connection and try again.');
+  }
 
-  const json = await response.json();
+  let json: any;
+  try {
+    json = await response.json();
+  } catch {
+    throw new Error(`Server returned an invalid response (HTTP ${response.status}).`);
+  }
 
   if (!response.ok) {
     throw new Error(json?.error ?? `Server error ${response.status}`);
   }
 
-  return json as AuthResult;
+  return json;
 }

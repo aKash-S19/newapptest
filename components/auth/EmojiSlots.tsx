@@ -4,9 +4,11 @@ import { Animated, Platform, StyleSheet, Text, View } from 'react-native';
 interface EmojiSlotsProps {
   selected: string[];
   total?: number;
+  /** Override bubble size. Defaults to 64 for ≤4 slots, 50 for 6 slots. */
+  size?: number;
 }
 
-function SlotBubble({ emoji, index }: { emoji: string | null; index: number }) {
+function SlotBubble({ emoji, index, bubbleSize }: { emoji: string | null; index: number; bubbleSize: number }) {
   const scale = useRef(new Animated.Value(emoji ? 0 : 1)).current;
   const opacity = useRef(new Animated.Value(emoji ? 0 : 1)).current;
 
@@ -41,11 +43,11 @@ function SlotBubble({ emoji, index }: { emoji: string | null; index: number }) {
       style={[
         styles.bubble,
         filled ? styles.bubbleFilled : styles.bubbleEmpty,
-        { transform: [{ scale }] },
+        { width: bubbleSize, height: bubbleSize, borderRadius: bubbleSize / 2, transform: [{ scale }] },
       ]}
     >
       {filled ? (
-        <Animated.Text style={[styles.emojiText, { opacity }]}>{emoji}</Animated.Text>
+        <Animated.Text style={[styles.emojiText, { fontSize: bubbleSize * 0.48, opacity }]}>{emoji}</Animated.Text>
       ) : (
         <View style={styles.emptyDot} />
       )}
@@ -53,14 +55,15 @@ function SlotBubble({ emoji, index }: { emoji: string | null; index: number }) {
   );
 }
 
-export function EmojiSlots({ selected, total = 4 }: EmojiSlotsProps) {
+export function EmojiSlots({ selected, total = 4, size }: EmojiSlotsProps) {
+  const bubbleSize = size ?? (total <= 4 ? 64 : 50);
   const slots = Array.from({ length: total }, (_, i) => selected[i] ?? null);
 
   return (
     <View style={styles.container}>
-      <View style={styles.row}>
+      <View style={[styles.row, { gap: bubbleSize <= 50 ? 10 : 14 }]}>
         {slots.map((emoji, i) => (
-          <SlotBubble key={i} emoji={emoji} index={i} />
+          <SlotBubble key={i} emoji={emoji} index={i} bubbleSize={bubbleSize} />
         ))}
       </View>
       <Text style={styles.progress}>
