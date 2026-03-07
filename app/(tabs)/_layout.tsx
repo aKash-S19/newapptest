@@ -1,14 +1,13 @@
+import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import { Redirect, Tabs } from 'expo-router';
 import React from 'react';
 
 import { HapticTab } from '@/components/haptic-tab';
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Colors } from '@/constants/theme';
 import { useAuth } from '@/contexts/AuthContext';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useAppTheme } from '@/hooks/use-app-theme';
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
+  const th = useAppTheme();
   const { status } = useAuth();
 
   if (status === 'unauthenticated') {
@@ -17,23 +16,44 @@ export default function TabLayout() {
 
   return (
     <Tabs
+      sceneContainerStyle={{ backgroundColor: th.bg }}
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
+        tabBarActiveTintColor:   th.accent,
+        tabBarInactiveTintColor: th.textSoft,
+        tabBarStyle: {
+          backgroundColor: th.tabBg,
+          borderTopColor: th.divider,
+          borderTopWidth: 1,
+        },
         headerShown: false,
         tabBarButton: HapticTab,
+        lazy: false,
+        freezeOnBlur: false,
       }}>
       <Tabs.Screen
         name="index"
         options={{
           title: 'Chats',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="bubble.left.and.bubble.right.fill" color={color} />,
+          tabBarIcon: ({ color, focused }) => (
+            <MaterialCommunityIcons
+              name={focused ? 'message-text' : 'message-text-outline'}
+              size={26}
+              color={color}
+            />
+          ),
         }}
       />
       <Tabs.Screen
         name="friends"
         options={{
-          title: 'Add Friends',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="person.badge.plus.fill" color={color} />,
+          title: 'Friends',
+          tabBarIcon: ({ color, focused }) => (
+            <MaterialCommunityIcons
+              name={focused ? 'account-plus' : 'account-plus-outline'}
+              size={26}
+              color={color}
+            />
+          ),
         }}
       />
     </Tabs>

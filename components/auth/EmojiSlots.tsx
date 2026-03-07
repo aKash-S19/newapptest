@@ -1,10 +1,12 @@
 import React, { useEffect, useRef } from 'react';
 import { Animated, Platform, StyleSheet, Text, View } from 'react-native';
 
+import { useLayout } from '@/lib/responsive';
+
 interface EmojiSlotsProps {
   selected: string[];
   total?: number;
-  /** Override bubble size. Defaults to 64 for ≤4 slots, 50 for 6 slots. */
+  /** Override bubble size. If omitted, computed from screen width. */
   size?: number;
 }
 
@@ -56,12 +58,23 @@ function SlotBubble({ emoji, index, bubbleSize }: { emoji: string | null; index:
 }
 
 export function EmojiSlots({ selected, total = 4, size }: EmojiSlotsProps) {
-  const bubbleSize = size ?? (total <= 4 ? 64 : 50);
+  const { isTablet, isSmallPhone, authCardInner } = useLayout();
+
+  // Gap between bubbles adapts to screen type
+  const slotGap = isSmallPhone ? 5 : isTablet ? 16 : 10;
+
+  // Bubble fills available width proportionally; clamped for aesthetics
+  const computedSize = Math.min(
+    isTablet ? 72 : 60,
+    Math.max(32, Math.floor((authCardInner - (total - 1) * slotGap) / total)),
+  );
+  const bubbleSize = size ?? computedSize;
+
   const slots = Array.from({ length: total }, (_, i) => selected[i] ?? null);
 
   return (
     <View style={styles.container}>
-      <View style={[styles.row, { gap: bubbleSize <= 50 ? 10 : 14 }]}>
+      <View style={[styles.row, { gap: slotGap }]}>
         {slots.map((emoji, i) => (
           <SlotBubble key={i} emoji={emoji} index={i} bubbleSize={bubbleSize} />
         ))}
@@ -86,7 +99,6 @@ const styles = StyleSheet.create({
   },
   row: {
     flexDirection: 'row',
-    gap: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },

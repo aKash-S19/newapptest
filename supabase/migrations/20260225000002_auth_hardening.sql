@@ -25,8 +25,11 @@ CREATE INDEX IF NOT EXISTS sessions_token_hash_idx ON public.sessions (token_has
 CREATE INDEX IF NOT EXISTS sessions_user_id_idx    ON public.sessions (user_id);
 
 ALTER TABLE public.sessions ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "service_role_all" ON public.sessions
-  AS PERMISSIVE FOR ALL TO service_role USING (true) WITH CHECK (true);
+DO $$ BEGIN
+  CREATE POLICY "service_role_all" ON public.sessions
+    AS PERMISSIVE FOR ALL TO service_role USING (true) WITH CHECK (true);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- ── login_attempts (rate limiting) ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.login_attempts (
@@ -39,5 +42,8 @@ CREATE INDEX IF NOT EXISTS login_attempts_username_time_idx
   ON public.login_attempts (username, attempted_at);
 
 ALTER TABLE public.login_attempts ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "service_role_all" ON public.login_attempts
-  AS PERMISSIVE FOR ALL TO service_role USING (true) WITH CHECK (true);
+DO $$ BEGIN
+  CREATE POLICY "service_role_all" ON public.login_attempts
+    AS PERMISSIVE FOR ALL TO service_role USING (true) WITH CHECK (true);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;

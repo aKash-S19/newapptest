@@ -8,6 +8,7 @@ import React, {
 } from 'react';
 
 import { getOrCreateDeviceId } from '@/lib/deviceId';
+import { getOrCreatePublicKey } from '@/lib/e2ee';
 import { callAuthFunction } from '@/lib/supabase';
 
 // ─── Keys ────────────────────────────────────────────────────────────────────
@@ -16,10 +17,37 @@ const USER_KEY    = 'privy_user_info';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 export interface UserInfo {
-  id:         string;
-  username:   string;
-  created_at: string;
-  avatar_url?: string | null;
+  id:              string;
+  username:        string;
+  created_at:      string;
+  avatar_url?:     string | null;
+  // populated only in search results
+  requestStatus?:  string;
+  chatId?:         string | null;
+  peerPublicKey?:  string | null;
+}
+
+export interface Message {
+  id:             string;
+  chat_id:        string;
+  sender_id:      string;
+  encrypted_body: string;
+  msg_type:       'text' | 'image' | 'video' | 'file' | 'voice';
+  file_name?:     string | null;
+  file_size?:     number | null;
+  mime_type?:     string | null;
+  status:         'sent' | 'delivered' | 'read';
+  created_at:     string;
+}
+
+export interface ChatRow {
+  chat_id:         string;
+  joined_at:       string;
+  user:            UserInfo;
+  peer_public_key: string | null;
+  last_message:    Pick<Message, 'id' | 'encrypted_body' | 'msg_type' | 'sender_id' | 'created_at' | 'status'> | null;
+  unread_count:    number;
+  last_message_at: string;
 }
 
 interface AuthContextType {
@@ -40,6 +68,15 @@ interface AuthContextType {
   findUser:      (query: string) => Promise<UserInfo[]>;
   checkUsername: (username: string) => Promise<{ available: boolean; reason?: string }>;
   updateUser:    (u: UserInfo) => void;
+  sendFriendRequest: (toUserId: string) => Promise<void>;
+  getChats:          () => Promise<ChatRow[]>;
+  sendMessage:       (chatId: string, encryptedBody: string, msgType?: string, fileMeta?: { fileName?: string; fileSize?: number; mimeType?: string }) => Promise<Message>;
+  getMessages:       (chatId: string, before?: string) => Promise<Message[]>;
+  markRead:          (chatId: string) => Promise<void>;
+  deleteMessage:     (messageId: string, forEveryone: boolean) => Promise<void>;
+  deleteChat:        (chatId: string) => Promise<void>;
+  openChat:          (peerId: string) => Promise<{ chatId: string; peerPublicKey: string | null }>;
+  removeFriend:      (peerId: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
@@ -66,6 +103,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setUser(u);
             setStatus('authenticated');
           }
+          // Re-upload ECDH public key on every boot — retry up to 5 times so
+          // transient network/crypto errors don't silently leave the key missing.
+          (async () => {
+            for (let i = 0; i < 5; i++) {
+              try {
+                const publicKey = await getOrCreatePublicKey();
+                await callAuthFunction({ action: 'store-public-key', sessionToken: storedToken, publicKey });
+                break; // success
+              } catch {
+                await new Promise(r => setTimeout(r, 2000 * (i + 1)));
+              }
+            }
+          })();
           return; // skip device check — already logged in
         }
 
@@ -93,29 +143,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSessionToken(token);
     setUser(userInfo);
     setStatus('authenticated');
+    // Upload ECDH public key — retry up to 5 times
+    (async () => {
+      for (let i = 0; i < 5; i++) {
+        try {
+          const publicKey = await getOrCreatePublicKey();
+          await callAuthFunction({ action: 'store-public-key', sessionToken: token, publicKey });
+          break;
+        } catch {
+          await new Promise(r => setTimeout(r, 2000 * (i + 1)));
+        }
+      }
+    })();
   }, []);
-
-  // ── Auth actions ──────────────────────────────────────────────────────────
   const register = useCallback(async (username: string, emoji: string[]) => {
-    const deviceId = await getOrCreateDeviceId();
+    const deviceId  = await getOrCreateDeviceId();
+    const publicKey = await getOrCreatePublicKey();   // generate key BEFORE the server call
     const res = await callAuthFunction({
-      action: 'register', username, emojiKey: emoji, deviceId,
+      action: 'register', username, emojiKey: emoji, deviceId, publicKey,
     });
     await saveSession(res.sessionToken, res.user);
   }, [saveSession]);
 
   const login = useCallback(async (emoji: string[]) => {
-    const deviceId = await getOrCreateDeviceId();
+    const deviceId  = await getOrCreateDeviceId();
+    const publicKey = await getOrCreatePublicKey();
     const res = await callAuthFunction({
-      action: 'login', emojiKey: emoji, deviceId,
+      action: 'login', emojiKey: emoji, deviceId, publicKey,
     });
     await saveSession(res.sessionToken, res.user);
   }, [saveSession]);
 
   const loginWithUsername = useCallback(async (username: string, emoji: string[]) => {
-    const deviceId = await getOrCreateDeviceId();
+    const deviceId  = await getOrCreateDeviceId();
+    const publicKey = await getOrCreatePublicKey();
     const res = await callAuthFunction({
-      action: 'login-username', username, emojiKey: emoji, deviceId,
+      action: 'login-username', username, emojiKey: emoji, deviceId, publicKey,
     });
     await saveSession(res.sessionToken, res.user);
   }, [saveSession]);
@@ -127,8 +190,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const recoverVerify = useCallback(async (
     username: string, answer: string, newEmoji: string[],
   ) => {
+    const publicKey = await getOrCreatePublicKey();
     const res = await callAuthFunction({
-      action: 'recover-verify', username, answer, newEmojiKey: newEmoji,
+      action: 'recover-verify', username, answer, newEmojiKey: newEmoji, publicKey,
     });
     await saveSession(res.sessionToken, res.user);
   }, [saveSession]);
@@ -171,11 +235,70 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     SecureStore.setItemAsync(USER_KEY, JSON.stringify(u)).catch(() => {});
   }, []);
 
+  const sendFriendRequest = useCallback(async (toUserId: string) => {
+    if (!sessionToken) throw new Error('Not authenticated');
+    await callAuthFunction({ action: 'send-request', sessionToken, toUserId });
+  }, [sessionToken]);
+
+  const getChats = useCallback(async (): Promise<ChatRow[]> => {
+    if (!sessionToken) return [];
+    const res = await callAuthFunction({ action: 'get-chats', sessionToken });
+    return res.chats ?? [];
+  }, [sessionToken]);
+
+  const sendMessage = useCallback(async (
+    chatId: string,
+    encryptedBody: string,
+    msgType = 'text',
+    fileMeta?: { fileName?: string; fileSize?: number; mimeType?: string },
+  ): Promise<Message> => {
+    if (!sessionToken) throw new Error('Not authenticated');
+    const res = await callAuthFunction({
+      action: 'send-message', sessionToken, chatId,
+      encryptedBody, msgType, ...fileMeta,
+    });
+    return res.message as Message;
+  }, [sessionToken]);
+
+  const getMessages = useCallback(async (chatId: string, before?: string): Promise<Message[]> => {
+    if (!sessionToken) return [];
+    const res = await callAuthFunction({ action: 'get-messages', sessionToken, chatId, before });
+    return (res.messages ?? []) as Message[];
+  }, [sessionToken]);
+
+  const markRead = useCallback(async (chatId: string): Promise<void> => {
+    if (!sessionToken) return;
+    await callAuthFunction({ action: 'mark-read', sessionToken, chatId });
+  }, [sessionToken]);
+
+  const deleteMessage = useCallback(async (messageId: string, forEveryone: boolean): Promise<void> => {
+    if (!sessionToken) throw new Error('Not authenticated');
+    await callAuthFunction({ action: 'delete-message', sessionToken, messageId, forEveryone });
+  }, [sessionToken]);
+
+  const deleteChat = useCallback(async (chatId: string): Promise<void> => {
+    if (!sessionToken) throw new Error('Not authenticated');
+    await callAuthFunction({ action: 'delete-chat', sessionToken, chatId });
+  }, [sessionToken]);
+
+  const openChat = useCallback(async (peerId: string): Promise<{ chatId: string; peerPublicKey: string | null }> => {
+    if (!sessionToken) throw new Error('Not authenticated');
+    const res = await callAuthFunction({ action: 'open-chat', sessionToken, peerId });
+    return { chatId: res.chatId as string, peerPublicKey: (res.peerPublicKey as string | null) ?? null };
+  }, [sessionToken]);
+
+  const removeFriend = useCallback(async (peerId: string): Promise<void> => {
+    if (!sessionToken) throw new Error('Not authenticated');
+    await callAuthFunction({ action: 'remove-friend', sessionToken, peerId });
+  }, [sessionToken]);
+
   return (
     <AuthContext.Provider value={{
       status, user, deviceUsername, sessionToken,
       register, login, loginWithUsername, recoverInit, recoverVerify,
       signOut, deleteAccount, findUser, checkUsername, updateUser,
+      sendFriendRequest, getChats,
+      sendMessage, getMessages, markRead, deleteMessage, deleteChat, openChat, removeFriend,
     }}>
       {children}
     </AuthContext.Provider>

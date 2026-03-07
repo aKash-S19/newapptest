@@ -45,3 +45,17 @@ app-example
 # Supabase Local
 /supabase/.temp/
 /supabase/.branch/
+
+# Editor swap / backup files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+
+# Logs
+*.log
+logs/

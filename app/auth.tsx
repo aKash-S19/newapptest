@@ -19,6 +19,8 @@ import { EmojiGrid } from '@/components/auth/EmojiGrid';
 import { EmojiSlots } from '@/components/auth/EmojiSlots';
 import { PrimaryButton } from '@/components/auth/PrimaryButton';
 import { useAuth } from '@/contexts/AuthContext';
+import { useAppTheme } from '@/hooks/use-app-theme';
+import { CONTENT_MAX_WIDTH, useLayout } from '@/lib/responsive';
 
 // ????????? Types & constants ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 type Step = 'boot' | 'new-username' | 'new-pin' | 'return-pin';
@@ -81,7 +83,18 @@ function StepDots({ current }: { current: number }) {
 
 // ????????? Main screen ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 export default function AuthScreen() {
-  const { status, deviceUsername, register, login, loginWithUsername, checkUsername } = useAuth();
+  const th = useAppTheme();
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  const { status, deviceUsername, register, loginWithUsername, checkUsername, login } = useAuth();
+  const { isTablet, isSmallPhone } = useLayout();
+
+  // ── Responsive sizing ─────────────────────────────────────────────────────
+  const lockSize     = isTablet ? 96  : isSmallPhone ? 62  : 76;
+  const lockIconFS   = isTablet ? 44  : isSmallPhone ? 28  : 34;
+  const appNameFS    = isTablet ? 42  : isSmallPhone ? 28  : 36;
+  const taglineFS    = isTablet ? 18  : isSmallPhone ? 13  : 16;
+  const cardMaxWidth = isTablet ? CONTENT_MAX_WIDTH : undefined;
+  const scrollHPad   = isTablet ? 32  : 20;
 
   const [step, setStep] = useState<Step>('boot');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
@@ -219,10 +232,12 @@ export default function AuthScreen() {
 
   if (step === 'boot') {
     return (
-      <SafeAreaView style={[styles.safe, styles.bootCenter]}>
-        <View style={styles.lockCard}><Text style={styles.lockIcon}>????</Text></View>
-        <Text style={styles.appName}>Privy</Text>
-        <ActivityIndicator size="large" color={ACCENT} style={{ marginTop: 24 }} />
+      <SafeAreaView style={[styles.safe, styles.bootCenter, { backgroundColor: th.bg }]}>
+        <View style={[styles.lockCard, { backgroundColor: th.cardBg, width: lockSize, height: lockSize, borderRadius: lockSize / 2 }]}>
+          <Text style={[styles.lockIcon, { fontSize: lockIconFS }]}>🔒</Text>
+        </View>
+        <Text style={[styles.appName, { color: th.textDark, fontSize: appNameFS }]}>Privy</Text>
+        <ActivityIndicator size="large" color={th.accent} style={{ marginTop: 24 }} />
       </SafeAreaView>
     );
   }
@@ -231,48 +246,52 @@ export default function AuthScreen() {
   const newFlowIndex = step === 'new-username' ? 0 : 1;
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView style={[styles.safe, { backgroundColor: th.bg }]}>
       <View style={styles.blobTopRight} />
       <View style={styles.blobBottomLeft} />
 
       <Animated.View style={[styles.screen, { opacity: screenOpacity, transform: [{ translateY: screenSlide }] }]}>
         <ScrollView
-          contentContainerStyle={styles.scrollContent}
+          contentContainerStyle={[styles.scrollContent, { paddingHorizontal: scrollHPad }]}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
           <Animated.View style={[styles.branding, { transform: [{ scale: brandScale }] }]}>
-            <View style={styles.lockCard}><Text style={styles.lockIcon}>????</Text></View>
-            <Text style={styles.appName}>Privy</Text>
-            <Text style={styles.tagline}>Private by Design.</Text>
-            <Text style={styles.micro}>No phone. No email. No tracking.</Text>
+            <View style={[styles.lockCard, { backgroundColor: th.cardBg, width: lockSize, height: lockSize, borderRadius: lockSize / 2 }]}>
+              <Text style={[styles.lockIcon, { fontSize: lockIconFS }]}>🔒</Text>
+            </View>
+            <Text style={[styles.appName, { color: th.textDark, fontSize: appNameFS }]}>Privy</Text>
+            <Text style={[styles.tagline, { color: th.textMed, fontSize: taglineFS }]}>Private by Design.</Text>
+            <Text style={[styles.micro,   { color: th.textSoft }]}>No phone. No email. No tracking.</Text>
           </Animated.View>
 
           {isNewFlow && <StepDots current={newFlowIndex} />}
 
           <Animated.View style={[
             styles.card,
+            { backgroundColor: th.cardBg, borderColor: th.isDark ? th.border : 'rgba(255,255,255,0.9)', maxWidth: cardMaxWidth },
             hasError && styles.cardError,
             { opacity: cardOpacity, transform: [{ translateX: shakeX }] },
           ]}>
 
             {step === 'new-username' && (<>
-              <Text style={styles.cardTitle}>{isLoggingIn ? 'Log in to Privy' : 'Choose a Username'}</Text>
-              <Text style={styles.cardDesc}>
+              <Text style={[styles.cardTitle, { color: th.textDark }]}>{isLoggingIn ? 'Log in to Privy' : 'Choose a Username'}</Text>
+              <Text style={[styles.cardDesc,  { color: th.textMed  }]}>
                 {isLoggingIn 
                   ? 'Enter your existing username to continue.'
                   : '4\u201320 characters \u00b7 letters, numbers, underscores\nThis is how friends find you on Privy.'}
               </Text>
               <View style={styles.inputWrapper}>
-                <Text style={styles.inputLabel}>Username</Text>
+                <Text style={[styles.inputLabel, { color: th.textSoft }]}>Username</Text>
                 <TextInput
                   style={[
                     styles.textInput,
+                    { backgroundColor: th.inputBg, color: th.textDark, borderColor: th.border },
                     usernameStatus === 'ok'      && styles.textInputGood,
                     usernameStatus === 'invalid' && styles.textInputBad,
                   ]}
                   placeholder="e.g. captain_vijay"
-                  placeholderTextColor={TEXT_SOFT}
+                  placeholderTextColor={th.textSoft}
                   value={username}
                   onChangeText={v => {
                     const cleaned = v.toLowerCase().replace(/[^a-z0-9_]/g, '');
@@ -295,15 +314,15 @@ export default function AuthScreen() {
                   {usernameStatus === 'invalid' && <Text style={styles.statusBad}>{'\u2717'}  {usernameReason}</Text>}
                 </View>
               </View>
-              <View style={styles.rulesBadge}>
-                <Text style={styles.rulesText}>{isLoggingIn ? 'Enter your existing Privy username' : 'No phone number, no email required'}</Text>
+              <View style={[styles.rulesBadge, { backgroundColor: th.inputBg }]}>
+                <Text style={[styles.rulesText, { color: th.textSoft }]}>{isLoggingIn ? 'Enter your existing Privy username' : 'No phone number, no email required'}</Text>
               </View>
               {serverError && <ErrorBadge message={serverError} />}
             </>)}
 
             {step === 'new-pin' && (<>
-              <Text style={styles.cardTitle}>{isLoggingIn ? 'Enter Your Emoji Key' : 'Create Your Emoji Key'}</Text>
-              <Text style={styles.cardDesc}>
+              <Text style={[styles.cardTitle, { color: th.textDark }]}>{isLoggingIn ? 'Enter Your Emoji Key' : 'Create Your Emoji Key'}</Text>
+              <Text style={[styles.cardDesc,  { color: th.textMed  }]}>
                 {isLoggingIn 
                   ? 'Enter the 6-emoji password for your account.'
                   : 'Pick 6 emojis in order.\nThis is your password \u2014 remember it!'}
@@ -319,10 +338,10 @@ export default function AuthScreen() {
             </>)}
 
             {step === 'return-pin' && (<>
-              <Text style={styles.cardTitle}>
-                {deviceUsername ? `Welcome back, ${deviceUsername}! \ud83d\udc4b` : 'Welcome back! \ud83d\udc4b'}
+              <Text style={[styles.cardTitle, { color: th.textDark }]}>
+                {deviceUsername ? `Welcome back, ${deviceUsername}! 👋` : 'Welcome back! 👋'}
               </Text>
-              <Text style={styles.cardDesc}>Enter your 6-emoji key to unlock Privy.</Text>
+              <Text style={[styles.cardDesc, { color: th.textMed }]}>Enter your 6-emoji key to unlock Privy.</Text>
               <EmojiSlots selected={selectedEmojis} total={MAX_EMOJIS} />
               <EmojiGrid onEmojiPress={handleEmojiPress} />
               <ActionRow
@@ -337,18 +356,19 @@ export default function AuthScreen() {
 
           {(step === 'new-pin' || step === 'return-pin') && (
             <View style={styles.microcopyBlock}>
-              <Text style={styles.microcopyLine}>{'\ud83d\udd10'}  Your key stays on your device.</Text>
-              <Text style={styles.microcopyLine}>{'\u2728'}  Only you control your identity.</Text>
+              <Text style={[styles.microcopyLine, { color: th.textSoft }]}>{'\ud83d\udd10'}  Your key stays on your device.</Text>
+              <Text style={[styles.microcopyLine, { color: th.textSoft }]}>{'\u2728'}  Only you control your identity.</Text>
             </View>
           )}
 
         </ScrollView>
-        <View style={styles.stickyFooter}>
+        <View style={[styles.stickyFooter, { backgroundColor: th.bg + 'F2', paddingHorizontal: scrollHPad }]}>
+          <View style={cardMaxWidth ? { maxWidth: cardMaxWidth, width: '100%', alignSelf: 'center' } : {}}>
           <View style={styles.ctaContainer}>
             {isLoading ? (
               <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" color={ACCENT} />
-                <Text style={styles.loadingText}>
+                <ActivityIndicator size="large" color={th.accent} />
+                <Text style={[styles.loadingText, { color: th.textMed }]}>
                   {step === 'new-pin' && isLoggingIn
                     ? 'Logging you in\u2026'
                     : step === 'new-pin'
@@ -369,11 +389,11 @@ export default function AuthScreen() {
                 <PrimaryButton label="Unlock Privy" onPress={handleLogin} disabled={selectedEmojis.length < MAX_EMOJIS} />
               )}
             </>)}
-          </View>
+          </View>{/* ctaContainer */}
 
           {step === 'new-pin' && (
             <Pressable onPress={() => goToStep('new-username')} style={styles.secondaryBtn}>
-              <Text style={styles.secondaryText}>{'\u2190'} Change username</Text>
+              <Text style={[styles.secondaryText, { color: th.textSoft }]}>{'←'} Change username</Text>
             </Pressable>
           )}
 
@@ -383,11 +403,12 @@ export default function AuthScreen() {
               setUsernameStatus('idle');
               setUsernameReason('');
             }} style={styles.secondaryBtn}>
-              <Text style={styles.secondaryText}>
-                {isLoggingIn ? 'Need an account? Create one \u2192' : 'Already have an account? Log in \u2192'}
+              <Text style={[styles.secondaryText, { color: th.textSoft }]}>
+                {isLoggingIn ? 'Need an account? Create one →' : 'Already have an account? Log in →'}
               </Text>
             </Pressable>
           )}
+          </View>{/* tablet wrapper */}
         </View>
       </Animated.View>
     </SafeAreaView>
@@ -403,7 +424,7 @@ const ACCENT    = '#4CAF82';
 const ERROR     = '#FF5F6D';
 
 const styles = StyleSheet.create({
-  safe:       { flex: 1, backgroundColor: BG },
+  safe:       { flex: 1 },
   bootCenter: { justifyContent: 'center', alignItems: 'center' },
   blobTopRight: {
     position: 'absolute', top: -80, right: -80, width: 260, height: 260,
@@ -415,7 +436,6 @@ const styles = StyleSheet.create({
   },
   screen: { flex: 1 },
   scrollContent: {
-    paddingHorizontal: 20,
     paddingTop: Platform.OS === 'android' ? 40 : 20,
     paddingBottom: 60,
     alignItems: 'center',
@@ -423,7 +443,7 @@ const styles = StyleSheet.create({
   branding: { alignItems: 'center', marginBottom: 20 },
   lockCard: {
     width: 76, height: 76, borderRadius: 38,
-    backgroundColor: CARD_BG, alignItems: 'center', justifyContent: 'center',
+    alignItems: 'center', justifyContent: 'center',
     borderWidth: 2, borderColor: 'rgba(255,255,255,0.95)',
     marginBottom: 14,
     ...Platform.select({
@@ -432,15 +452,15 @@ const styles = StyleSheet.create({
     }),
   },
   lockIcon: { fontSize: 34, includeFontPadding: false },
-  appName:  { fontSize: 36, fontWeight: '800', color: TEXT_DARK, letterSpacing: 2.5, marginBottom: 4 },
-  tagline:  { fontSize: 16, fontWeight: '600', color: TEXT_MED,  letterSpacing: 0.5, marginBottom: 4 },
-  micro:    { fontSize: 12, fontWeight: '400', color: TEXT_SOFT, letterSpacing: 0.3 },
+  appName:  { fontSize: 36, fontFamily: 'Inter_700Bold', letterSpacing: 2.5, marginBottom: 4 },
+  tagline:  { fontSize: 16, fontFamily: 'Inter_500Medium', letterSpacing: 0.5, marginBottom: 4 },
+  micro:    { fontSize: 12, fontFamily: 'Inter_400Regular', letterSpacing: 0.3 },
   dotsRow:   { flexDirection: 'row', gap: 6, marginBottom: 14 },
   dot:       { width: 8,  height: 8, borderRadius: 4, backgroundColor: '#D0DAE4' },
   dotActive: { width: 22, height: 8, borderRadius: 4, backgroundColor: ACCENT },
   card: {
-    width: '100%', backgroundColor: CARD_BG, borderRadius: 28,
-    padding: 24, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.9)',
+    width: '100%', borderRadius: 28,
+    padding: 24, borderWidth: 1.5,
     alignItems: 'center', gap: 18, marginBottom: 18,
     ...Platform.select({
       web:     { boxShadow: '0px 12px 28px rgba(123,158,192,0.18)' } as any,
@@ -454,40 +474,38 @@ const styles = StyleSheet.create({
       default: { shadowColor: ERROR, shadowOpacity: 0.3 },
     }),
   },
-  cardTitle: { fontSize: 22, fontWeight: '700', color: TEXT_DARK, textAlign: 'center', letterSpacing: 0.3 },
-  cardDesc:  { fontSize: 14, fontWeight: '400', color: TEXT_MED,  textAlign: 'center', lineHeight: 21, letterSpacing: 0.2, marginTop: -4 },
+  cardTitle: { fontSize: 22, fontFamily: 'Inter_700Bold', textAlign: 'center', letterSpacing: 0.3 },
+  cardDesc:  { fontSize: 14, fontFamily: 'Inter_400Regular', textAlign: 'center', lineHeight: 21, letterSpacing: 0.2, marginTop: -4 },
   actionRow:      { flexDirection: 'row', gap: 10, justifyContent: 'center', flexWrap: 'wrap', minHeight: 32 },
   chipBtn:        { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: '#EDF0F4', borderWidth: 1, borderColor: 'rgba(0,0,0,0.04)' },
   chipDanger:     { backgroundColor: '#FEF0F1', borderColor: 'rgba(255,95,109,0.15)' },
-  chipText:       { fontSize: 13, color: TEXT_MED, fontWeight: '500' },
+  chipText:       { fontSize: 13, color: TEXT_MED, fontFamily: 'Inter_500Medium' },
   chipTextDanger: { color: ERROR },
   errorBadge: { backgroundColor: 'rgba(255,95,109,0.09)', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 1, borderColor: 'rgba(255,95,109,0.18)', width: '100%' },
-  errorText:  { fontSize: 13, color: ERROR, fontWeight: '600', textAlign: 'center' },
+  errorText:  { fontSize: 13, color: ERROR, fontFamily: 'Inter_600SemiBold', textAlign: 'center' },
   inputWrapper: { width: '100%', gap: 6 },
-  inputLabel:   { fontSize: 12, color: TEXT_SOFT, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase' },
+  inputLabel:   { fontSize: 12, fontFamily: 'Inter_600SemiBold', letterSpacing: 0.5, textTransform: 'uppercase' },
   textInput: {
-    width: '100%', height: 50, borderRadius: 14, backgroundColor: '#EDF0F4',
-    paddingHorizontal: 16, fontSize: 15, color: TEXT_DARK, fontWeight: '500',
-    borderWidth: 1.5, borderColor: 'rgba(0,0,0,0.06)',
+    width: '100%', height: 50, borderRadius: 14,
+    paddingHorizontal: 16, fontSize: 15, fontFamily: 'Inter_400Regular',
+    borderWidth: 1.5,
   },
   textInputGood: { borderColor: 'rgba(76,175,130,0.5)', backgroundColor: 'rgba(76,175,130,0.05)' },
   textInputBad:  { borderColor: 'rgba(255,95,109,0.4)', backgroundColor: 'rgba(255,95,109,0.04)' },
   usernameStatusRow: { flexDirection: 'row', alignItems: 'center', minHeight: 18 },
-  statusOk:  { fontSize: 13, color: ACCENT, fontWeight: '600' },
-  statusBad: { fontSize: 13, color: ERROR,  fontWeight: '600' },
-  rulesBadge: { backgroundColor: '#EDF0F4', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8 },
-  rulesText:  { fontSize: 12, color: TEXT_SOFT, textAlign: 'center' },
+  statusOk:  { fontSize: 13, color: ACCENT, fontFamily: 'Inter_600SemiBold' },
+  statusBad: { fontSize: 13, color: ERROR,  fontFamily: 'Inter_600SemiBold' },
+  rulesBadge: { borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8 },
+  rulesText:  { fontSize: 12, textAlign: 'center', fontFamily: 'Inter_400Regular' },
   microcopyBlock: { alignItems: 'center', gap: 5, marginBottom: 22 },
-  microcopyLine:  { fontSize: 12.5, color: TEXT_SOFT, fontWeight: '400', letterSpacing: 0.2 },
+  microcopyLine:  { fontSize: 12.5, fontFamily: 'Inter_400Regular', letterSpacing: 0.2 },
   stickyFooter: {
-    paddingHorizontal: 20,
     paddingTop: 12,
     paddingBottom: Platform.OS === 'android' ? 24 : 10,
-    backgroundColor: 'rgba(244, 246, 248, 0.95)', // Matches BG with slight transparency
   },
   ctaContainer:    { width: '100%', marginBottom: 16 },
   loadingContainer:{ alignItems: 'center', gap: 12, paddingVertical: 8 },
-  loadingText:     { fontSize: 14, color: TEXT_MED, fontWeight: '500' },
+  loadingText:     { fontSize: 14, fontFamily: 'Inter_500Medium' },
   secondaryBtn:    { paddingVertical: 10, paddingHorizontal: 20, alignSelf: 'center' },
-  secondaryText:   { fontSize: 14.5, color: TEXT_SOFT, fontWeight: '500', textAlign: 'center', letterSpacing: 0.2 },
+  secondaryText:   { fontSize: 14.5, fontFamily: 'Inter_500Medium', textAlign: 'center', letterSpacing: 0.2 },
 });

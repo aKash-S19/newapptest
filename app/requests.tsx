@@ -2,12 +2,14 @@ import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Platform, Pressable,
-  RefreshControl, ScrollView, StyleSheet, Text, View,
+    ActivityIndicator, Alert, Platform, Pressable,
+    RefreshControl, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useAuth } from '@/contexts/AuthContext';
+import { useAppTheme } from '@/hooks/use-app-theme';
+import { useLayout } from '@/lib/responsive';
 import { callAuthFunction, supabaseClient } from '@/lib/supabase';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -15,14 +17,7 @@ type ReqUser   = { id: string; username: string };
 type Received  = { id: string; status: string; created_at: string; sender: ReqUser };
 type Sent      = { id: string; status: string; created_at: string; receiver: ReqUser };
 
-// ─── Theme ───────────────────────────────────────────────────────────────────
-const BG        = '#F4F6F8';
-const CARD_BG   = '#FFFFFF';
-const TEXT_DARK = '#1A2332';
-const TEXT_SOFT = '#8FA3B1';
-const TEXT_MED  = '#5A7182';
-const ACCENT    = '#4CAF82';
-const ERROR     = '#FF5F6D';
+const ERROR = '#FF5F6D';
 
 function timeAgo(iso: string) {
   const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -33,6 +28,8 @@ function timeAgo(iso: string) {
 }
 
 export default function RequestsScreen() {
+  const th = useAppTheme();
+  const { isTablet } = useLayout();
   const { sessionToken, user } = useAuth();
   const [activeTab, setActiveTab]     = useState<'received' | 'sent'>('received');
   const [received,  setReceived]      = useState<Received[]>([]);
@@ -106,32 +103,43 @@ export default function RequestsScreen() {
   const totalPending = received.length + sent.length;
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView style={[s.safe, { backgroundColor: th.bg }]}>
+      <View style={[{ flex: 1, width: '100%' }, isTablet && { maxWidth: 720, alignSelf: 'center' as const }]}>
       {/* ── Header ── */}
-      <View style={styles.header}>
-        <Pressable onPress={() => router.back()} hitSlop={10} style={styles.backBtn}>
-          <Text style={styles.backIcon}>←</Text>
+      <View style={[s.header, { backgroundColor: th.bg, borderBottomColor: th.divider }]}>
+        <Pressable onPress={() => router.back()} hitSlop={10} style={s.backBtn}>
+          <Text style={[s.backIcon, { color: th.textDark }]}>←</Text>
         </Pressable>
-        <Text style={styles.headerTitle}>Requests</Text>
-        <View style={styles.headerBadgeBox}>
+        <Text style={[s.headerTitle, { color: th.textDark }]}>Requests</Text>
+        <View style={s.headerBadgeBox}>
           {totalPending > 0 && (
-            <View style={styles.headerBadge}>
-              <Text style={styles.headerBadgeText}>{totalPending}</Text>
+            <View style={s.headerBadge}>
+              <Text style={s.headerBadgeText}>{totalPending}</Text>
             </View>
           )}
         </View>
       </View>
 
       {/* ── Tabs ── */}
-      <View style={styles.tabBar}>
+      <View style={s.tabBar}>
         {(['received', 'sent'] as const).map(tab => (
           <Pressable
             key={tab}
-            style={[styles.tabBtn, activeTab === tab && styles.tabBtnActive]}
+            style={[
+              s.tabBtn,
+              { backgroundColor: th.inputBg },
+              activeTab === tab && { backgroundColor: th.cardBg, borderWidth: 1.5, borderColor: th.accent + '30' },
+            ]}
             onPress={() => { Haptics.selectionAsync(); setActiveTab(tab); }}
           >
-            <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
-              {tab === 'received' ? `Received${received.length ? ` (${received.length})` : ''}` : `Sent${sent.length ? ` (${sent.length})` : ''}`}
+            <Text style={[
+              s.tabText,
+              { color: th.textMed },
+              activeTab === tab && { color: th.accent, fontFamily: 'Inter_700Bold' },
+            ]}>
+              {tab === 'received'
+                ? `Received${received.length ? ` (${received.length})` : ''}`
+                : `Sent${sent.length ? ` (${sent.length})` : ''}`}
             </Text>
           </Pressable>
         ))}
@@ -139,44 +147,44 @@ export default function RequestsScreen() {
 
       {/* ── Content ── */}
       {loading ? (
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={ACCENT} />
+        <View style={s.center}>
+          <ActivityIndicator size="large" color={th.accent} />
         </View>
       ) : (
         <ScrollView
-          contentContainerStyle={styles.content}
+          contentContainerStyle={s.content}
           showsVerticalScrollIndicator={false}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={ACCENT} />}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={th.accent} />}
         >
           {activeTab === 'received' && (
             received.length === 0 ? (
-              <View style={styles.emptyWrap}>
-                <Text style={styles.emptyIcon}>📭</Text>
-                <Text style={styles.emptyTitle}>No pending requests</Text>
+              <View style={s.emptyWrap}>
+                <Text style={s.emptyIcon}>📭</Text>
+                <Text style={[s.emptyTitle, { color: th.textSoft }]}>No pending requests</Text>
               </View>
             ) : received.map(req => (
-              <View key={req.id} style={styles.reqCard}>
-                <View style={styles.reqInfo}>
-                  <View style={styles.reqAvatar}>
-                    <Text style={styles.reqAvatarLetter}>{req.sender.username[0].toUpperCase()}</Text>
+              <View key={req.id} style={[s.reqCard, { backgroundColor: th.cardBg, borderColor: th.border }]}>
+                <View style={s.reqInfo}>
+                  <View style={[s.reqAvatar, { backgroundColor: th.accent + '22' }]}>
+                    <Text style={[s.reqAvatarLetter, { color: th.accent }]}>{req.sender.username[0].toUpperCase()}</Text>
                   </View>
-                  <View style={styles.reqMeta}>
-                    <Text style={styles.reqName}>{req.sender.username}</Text>
-                    <Text style={styles.reqTime}>{timeAgo(req.created_at)}</Text>
+                  <View style={s.reqMeta}>
+                    <Text style={[s.reqName, { color: th.textDark }]}>{req.sender.username}</Text>
+                    <Text style={[s.reqTime, { color: th.textSoft }]}>{timeAgo(req.created_at)}</Text>
                   </View>
                 </View>
-                <View style={styles.reqActions}>
+                <View style={s.reqActions}>
                   <Pressable
-                    style={[styles.actionBtnAccept, acting === req.id && styles.btnDisabled]}
+                    style={[s.actionBtnAccept, { backgroundColor: th.accent }, acting === req.id && s.btnDisabled]}
                     onPress={() => handleAccept(req.id)} disabled={acting === req.id}>
                     {acting === req.id
                       ? <ActivityIndicator size="small" color="#fff" />
-                      : <Text style={styles.actionTextAccept}>Accept</Text>}
+                      : <Text style={s.actionTextAccept}>Accept</Text>}
                   </Pressable>
                   <Pressable
-                    style={[styles.actionBtnDecline, acting === req.id && styles.btnDisabled]}
+                    style={[s.actionBtnDecline, acting === req.id && s.btnDisabled]}
                     onPress={() => handleDecline(req.id)} disabled={acting === req.id}>
-                    <Text style={styles.actionTextDecline}>Decline</Text>
+                    <Text style={s.actionTextDecline}>Decline</Text>
                   </Pressable>
                 </View>
               </View>
@@ -185,93 +193,82 @@ export default function RequestsScreen() {
 
           {activeTab === 'sent' && (
             sent.length === 0 ? (
-              <View style={styles.emptyWrap}>
-                <Text style={styles.emptyIcon}>📤</Text>
-                <Text style={styles.emptyTitle}>No sent requests</Text>
+              <View style={s.emptyWrap}>
+                <Text style={s.emptyIcon}>📤</Text>
+                <Text style={[s.emptyTitle, { color: th.textSoft }]}>No sent requests</Text>
               </View>
             ) : sent.map(req => (
-              <View key={req.id} style={styles.reqCard}>
-                <View style={styles.reqInfo}>
-                  <View style={styles.reqAvatar}>
-                    <Text style={styles.reqAvatarLetter}>{req.receiver.username[0].toUpperCase()}</Text>
+              <View key={req.id} style={[s.reqCard, { backgroundColor: th.cardBg, borderColor: th.border }]}>
+                <View style={s.reqInfo}>
+                  <View style={[s.reqAvatar, { backgroundColor: th.accent + '22' }]}>
+                    <Text style={[s.reqAvatarLetter, { color: th.accent }]}>{req.receiver.username[0].toUpperCase()}</Text>
                   </View>
-                  <View style={styles.reqMeta}>
-                    <Text style={styles.reqName}>{req.receiver.username}</Text>
-                    <Text style={styles.reqTime}>{timeAgo(req.created_at)}</Text>
+                  <View style={s.reqMeta}>
+                    <Text style={[s.reqName, { color: th.textDark }]}>{req.receiver.username}</Text>
+                    <Text style={[s.reqTime, { color: th.textSoft }]}>{timeAgo(req.created_at)}</Text>
                   </View>
                 </View>
                 <Pressable
-                  style={[styles.actionBtnCancel, acting === req.id && styles.btnDisabled]}
+                  style={[s.actionBtnCancel, { backgroundColor: th.inputBg }, acting === req.id && s.btnDisabled]}
                   onPress={() => handleCancel(req.id)} disabled={acting === req.id}>
                   {acting === req.id
-                    ? <ActivityIndicator size="small" color={TEXT_MED} />
-                    : <Text style={styles.actionTextCancel}>Cancel</Text>}
+                    ? <ActivityIndicator size="small" color={th.textMed} />
+                    : <Text style={[s.actionTextCancel, { color: th.textMed }]}>Cancel</Text>}
                 </Pressable>
               </View>
             ))
           )}
         </ScrollView>
       )}
+      </View>
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  safe:    { flex: 1, backgroundColor: BG },
+const s = StyleSheet.create({
+  safe:    { flex: 1 },
   center:  { flex: 1, alignItems: 'center', justifyContent: 'center' },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingTop: Platform.OS === 'android' ? 16 : 12, paddingBottom: 12,
-    borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.05)', backgroundColor: BG,
+    borderBottomWidth: 1,
   },
   backBtn:  { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  backIcon: { fontSize: 24, color: TEXT_DARK },
-  headerTitle: { fontSize: 22, fontWeight: '800', color: TEXT_DARK },
-  headerBadgeBox: { width: 40, alignItems: 'flex-end' },
+  backIcon: { fontSize: 24 },
+  headerTitle:     { fontSize: 22, fontFamily: 'Inter_700Bold' },
+  headerBadgeBox:  { width: 40, alignItems: 'flex-end' },
   headerBadge: {
     backgroundColor: ERROR, borderRadius: 10, minWidth: 22, height: 22,
     alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5,
   },
-  headerBadgeText: { color: '#fff', fontSize: 11, fontWeight: '800' },
+  headerBadgeText: { color: '#fff', fontSize: 11, fontFamily: 'Inter_700Bold' },
 
   tabBar: { flexDirection: 'row', padding: 12, gap: 10 },
-  tabBtn: {
-    flex: 1, paddingVertical: 10, alignItems: 'center',
-    borderRadius: 12, backgroundColor: '#E4E9F0',
-  },
-  tabBtnActive: {
-    backgroundColor: CARD_BG, borderWidth: 1.5, borderColor: 'rgba(76,175,130,0.2)',
-  },
-  tabText:       { fontSize: 14, fontWeight: '600', color: TEXT_MED },
-  tabTextActive: { color: ACCENT, fontWeight: '700' },
+  tabBtn: { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: 12 },
+  tabText: { fontSize: 14, fontFamily: 'Inter_500Medium' },
 
   content: { padding: 16, gap: 12, paddingBottom: 40 },
 
-  emptyWrap:   { alignItems: 'center', paddingTop: 60, gap: 12 },
-  emptyIcon:   { fontSize: 48 },
-  emptyTitle:  { fontSize: 18, fontWeight: '600', color: TEXT_SOFT },
+  emptyWrap:  { alignItems: 'center', paddingTop: 60, gap: 12 },
+  emptyIcon:  { fontSize: 48 },
+  emptyTitle: { fontSize: 18, fontFamily: 'Inter_500Medium' },
 
   reqCard: {
-    backgroundColor: CARD_BG, borderRadius: 16, padding: 14, gap: 12,
-    borderWidth: 1, borderColor: 'rgba(0,0,0,0.05)',
-    ...Platform.select({
-      web:     { boxShadow: '0px 2px 8px rgba(123,158,192,0.08)' } as any,
-      default: { shadowColor: '#7B9EC0', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.08, shadowRadius: 8, elevation: 2 },
-    }),
+    borderRadius: 16, padding: 14, gap: 12, borderWidth: 1,
   },
-  reqInfo:        { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  reqAvatar:      { width: 46, height: 46, borderRadius: 23, backgroundColor: 'rgba(76,175,130,0.15)', alignItems: 'center', justifyContent: 'center' },
-  reqAvatarLetter:{ fontSize: 18, fontWeight: '700', color: ACCENT },
-  reqMeta:        { flex: 1 },
-  reqName:        { fontSize: 16, fontWeight: '700', color: TEXT_DARK },
-  reqTime:        { fontSize: 13, color: TEXT_SOFT, marginTop: 2 },
+  reqInfo:         { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  reqAvatar:       { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },
+  reqAvatarLetter: { fontSize: 18, fontFamily: 'Inter_700Bold' },
+  reqMeta:         { flex: 1 },
+  reqName:         { fontSize: 16, fontFamily: 'Inter_600SemiBold' },
+  reqTime:         { fontSize: 13, fontFamily: 'Inter_400Regular', marginTop: 2 },
 
   reqActions:        { flexDirection: 'row', gap: 10 },
-  actionBtnAccept:   { flex: 1, backgroundColor: ACCENT,    paddingVertical: 11, borderRadius: 12, alignItems: 'center' },
-  actionTextAccept:  { color: '#fff', fontSize: 14, fontWeight: '700' },
+  actionBtnAccept:   { flex: 1, paddingVertical: 11, borderRadius: 12, alignItems: 'center' },
+  actionTextAccept:  { color: '#fff', fontSize: 14, fontFamily: 'Inter_600SemiBold' },
   actionBtnDecline:  { flex: 1, backgroundColor: '#FEF0F1', paddingVertical: 11, borderRadius: 12, alignItems: 'center' },
-  actionTextDecline: { color: ERROR, fontSize: 14, fontWeight: '700' },
-  actionBtnCancel:   { backgroundColor: '#EDF0F4', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, alignSelf: 'flex-start' },
-  actionTextCancel:  { color: TEXT_MED, fontSize: 14, fontWeight: '600' },
+  actionTextDecline: { color: ERROR, fontSize: 14, fontFamily: 'Inter_600SemiBold' },
+  actionBtnCancel:   { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, alignSelf: 'flex-start' },
+  actionTextCancel:  { fontSize: 14, fontFamily: 'Inter_500Medium' },
   btnDisabled:       { opacity: 0.6 },
 });

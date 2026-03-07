@@ -1,22 +1,26 @@
+import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
+import Slider from '@react-native-community/slider';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
+import { Image } from 'expo-image';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import * as LocalAuthentication from 'expo-local-authentication';
-import { Image } from 'expo-image';
 import { router } from 'expo-router';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Modal, Platform, Pressable,
-  ScrollView, Share, StyleSheet, Switch, Text,
-  TextInput, TouchableOpacity, View,
+    ActivityIndicator, Alert, Modal, Platform, Pressable,
+    ScrollView, Share, StyleSheet, Switch, Text,
+    TextInput,
+    View
 } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
-import { callAuthFunction, supabaseClient } from '@/lib/supabase';
+import { useLayout } from '@/lib/responsive';
+import { callAuthFunction } from '@/lib/supabase';
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
 const BG        = '#F4F6F8';
@@ -58,16 +62,17 @@ export default function ProfileScreen() {
   const textDark = dk ? DK_TEXT_DARK : TEXT_DARK;
   const textSoft = dk ? DK_TEXT_SOFT : TEXT_SOFT;
   const dividerC = dk ? DK_DIVIDER : 'rgba(0,0,0,0.04)';
+  const { isTablet } = useLayout();
 
   // Dynamic style objects (depend on settings)
   const dynSafe    = { flex: 1, backgroundColor: bg } as const;
   const dynContent = { paddingHorizontal: 18, paddingTop: 16, paddingBottom: 40, gap: 10 } as const;
   const dynCard    = { backgroundColor: cardBg, borderRadius: 18, overflow: 'hidden' as const, borderWidth: 1, borderColor: dk ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)' };
   const dynRow     = { flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'space-between' as const, paddingHorizontal: 16, paddingVertical: 14 };
-  const dynRowLabel   = { fontSize: FS, fontWeight: '500' as const, color: textDark };
+  const dynRowLabel   = { fontSize: FS, fontFamily: 'Inter_500Medium' as const, color: textDark };
   const dynRowValue   = { fontSize: FS - 2, color: textSoft };
   const dynDivider    = { height: 1, backgroundColor: dividerC, marginLeft: 54 };
-  const dynSectionTitle = { fontSize: 12, fontWeight: '700' as const, color: textSoft, textTransform: 'uppercase' as const, letterSpacing: 1.2, marginLeft: 6, marginBottom: 4, marginTop: 10 };
+  const dynSectionTitle = { fontSize: 12, fontFamily: 'Inter_700Bold' as const, color: textSoft, textTransform: 'uppercase' as const, letterSpacing: 1.2, marginLeft: 6, marginBottom: 4, marginTop: 10 };
 
   // Local state for modals
   const [editUsernameVisible, setEditUsernameVisible]     = useState(false);
@@ -252,6 +257,7 @@ export default function ProfileScreen() {
 
   return (
     <SafeAreaView style={dynSafe}>
+      <View style={[{ flex: 1, width: '100%' }, isTablet && { maxWidth: 720, alignSelf: 'center' as const }]}>
       <ScrollView contentContainerStyle={dynContent} showsVerticalScrollIndicator={false}>
 
         {/* ── Avatar + name ── */}
@@ -265,44 +271,44 @@ export default function ProfileScreen() {
               <Image source={avatarSource} style={styles.idAvatarImg} contentFit="cover" />
             ) : (
               <View style={[styles.idAvatarImg, { alignItems: 'center', justifyContent: 'center', backgroundColor: `${ACC}25` }]}>
-                <Text style={{ fontSize: 36 }}>👤</Text>
+                <MaterialCommunityIcons name="account" size={36} color={ACC} />
               </View>
             )}
-            <View style={[styles.cameraTag, { backgroundColor: ACC }]}><Text style={styles.cameraIcon}>📷</Text></View>
+            <View style={[styles.cameraTag, { backgroundColor: ACC }]}><MaterialCommunityIcons name="camera" size={12} color="#fff" /></View>
           </View>
           <View style={styles.idInfo}>
             <Text style={[styles.idName, { color: textDark, fontSize: FS + 3 }]}>{user?.username ?? '—'}</Text>
             <Text style={[styles.idSince, { color: textSoft }]}>Member since {joinDate}</Text>
             <Text style={{ color: ACC, fontSize: 11, marginTop: 2 }}>Tap to change photo</Text>
           </View>
-          <View style={[styles.idBadge, { backgroundColor: `${ACC}1A`, borderColor: `${ACC}33` }]}><Text style={styles.idBadgeText}>🛡️</Text></View>
+          <View style={[styles.idBadge, { backgroundColor: `${ACC}1A`, borderColor: `${ACC}33` }]}><MaterialCommunityIcons name="shield-check" size={22} color={ACC} /></View>
         </Pressable>
 
         {/* ─── 1. Profile ─────────────────────────────────────────────── */}
         <Text style={dynSectionTitle}>Profile</Text>
         <View style={dynCard}>
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={handleChangePicture}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>👤</Text><Text style={[dynRowLabel]}>Change Profile Picture</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="account-edit-outline" size={20} color={textSoft} /><Text style={[dynRowLabel]}>Change Profile Picture</Text></View>
             <Text style={styles.chevron}>›</Text>
           </Pressable>
           <View style={[dynDivider]} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={() => { setNewUsername(user?.username ?? ''); setEditUsernameVisible(true); }}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>✏️</Text><Text style={dynRowLabel}>Edit Username</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="pencil-outline" size={20} color={textSoft} /><Text style={dynRowLabel}>Edit Username</Text></View>
             <View style={styles.rowRight}><Text style={dynRowValue}>{user?.username}</Text><Text style={styles.chevron}>›</Text></View>
           </Pressable>
           <View style={[dynDivider]} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={handleCopyId}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>🆔</Text><Text style={dynRowLabel}>Copy Privy ID</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="content-copy" size={20} color={textSoft} /><Text style={dynRowLabel}>Copy Privy ID</Text></View>
             <Text style={styles.chevron}>›</Text>
           </Pressable>
           <View style={[dynDivider]} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={handleShareId}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>🔗</Text><Text style={dynRowLabel}>Share Privy ID</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="share-variant-outline" size={20} color={textSoft} /><Text style={dynRowLabel}>Share Privy ID</Text></View>
             <Text style={styles.chevron}>›</Text>
           </Pressable>
           <View style={[dynDivider]} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={() => setQrVisible(true)}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>📷</Text><Text style={dynRowLabel}>QR Code for Adding Friends</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="qrcode" size={20} color={textSoft} /><Text style={dynRowLabel}>QR Code for Adding Friends</Text></View>
             <Text style={styles.chevron}>›</Text>
           </Pressable>
         </View>
@@ -311,7 +317,7 @@ export default function ProfileScreen() {
         <Text style={dynSectionTitle}>Personalization</Text>
         <View style={dynCard}>
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={() => setColorPickerVisible(true)}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>🎨</Text><Text style={dynRowLabel}>Theme Color</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="palette-outline" size={20} color={textSoft} /><Text style={dynRowLabel}>Theme Color</Text></View>
             <View style={styles.rowRight}>
               <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: ACC, marginRight: 4 }} />
               <Text style={styles.chevron}>›</Text>
@@ -319,34 +325,55 @@ export default function ProfileScreen() {
           </Pressable>
           <View style={dynDivider} />
           <View style={dynRow}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>🌙</Text><Text style={dynRowLabel}>Dark Mode</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="weather-night" size={20} color={textSoft} /><Text style={dynRowLabel}>Dark Mode</Text></View>
             <Switch value={settings.darkMode} onValueChange={v => { Haptics.selectionAsync(); update('darkMode', v); }}
               trackColor={{ false: '#D0DAE4', true: ACC }} thumbColor="#fff" />
           </View>
           <View style={dynDivider} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]}
             onPress={() => { update('bubbleStyle', settings.bubbleStyle === 'rounded' ? 'square' : 'rounded'); Haptics.selectionAsync(); }}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>💬</Text><Text style={dynRowLabel}>Chat Bubble Style</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="message-outline" size={20} color={textSoft} /><Text style={dynRowLabel}>Chat Bubble Style</Text></View>
             <View style={styles.rowRight}><Text style={dynRowValue}>{settings.bubbleStyle === 'rounded' ? 'Rounded' : 'Square'}</Text><Text style={styles.chevron}>›</Text></View>
           </Pressable>
           <View style={dynDivider} />
-          <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]}
-            onPress={() => { const s = ['sm','md','lg','xl'] as const; update('fontSize', s[(s.indexOf(settings.fontSize)+1)%4]); Haptics.selectionAsync(); }}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>🔤</Text><Text style={dynRowLabel}>Font Size</Text></View>
-            <View style={styles.rowRight}><Text style={dynRowValue}>{settings.fontSize.toUpperCase()}</Text><Text style={styles.chevron}>›</Text></View>
-          </Pressable>
+          <View style={{ paddingHorizontal: 16, paddingVertical: 14, gap: 10 }}>
+            <View style={styles.rowLeft}>
+              <MaterialCommunityIcons name="format-size" size={20} color={textSoft} />
+              <Text style={dynRowLabel}>Font Size</Text>
+              <Text style={[dynRowValue, { marginLeft: 'auto' }]}>{({ sm: 'Small', md: 'Medium', lg: 'Large', xl: 'X-Large' })[settings.fontSize]}</Text>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={{ fontSize: 12, color: textSoft, fontFamily: 'Inter_400Regular' }}>A</Text>
+              <Slider
+                style={{ flex: 1, height: 36 }}
+                minimumValue={0}
+                maximumValue={3}
+                step={1}
+                value={(['sm','md','lg','xl'] as const).indexOf(settings.fontSize)}
+                onValueChange={v => {
+                  const s = ['sm','md','lg','xl'] as const;
+                  update('fontSize', s[v]);
+                  Haptics.selectionAsync();
+                }}
+                minimumTrackTintColor={ACC}
+                maximumTrackTintColor={dk ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.12)'}
+                thumbTintColor={ACC}
+              />
+              <Text style={{ fontSize: 20, color: textSoft, fontFamily: 'Inter_400Regular' }}>A</Text>
+            </View>
+          </View>
         </View>
 
         {/* ─── 3. Chat Preferences ────────────────────────────────────── */}
         <Text style={dynSectionTitle}>Chat Preferences</Text>
         <View style={dynCard}>
           {[
-            { icon:'✔️', label:'Read Receipts',       key:'readReceipts'    as const },
-            { icon:'✏️', label:'Typing Indicators',   key:'typingIndicator' as const },
+            { icon:'check-all',        label:'Read Receipts',     key:'readReceipts'    as const },
+            { icon:'dots-horizontal',  label:'Typing Indicators', key:'typingIndicator' as const },
           ].map((item, i, arr) => (
             <React.Fragment key={item.key}>
               <View style={dynRow}>
-                <View style={styles.rowLeft}><Text style={styles.rowIcon}>{item.icon}</Text><Text style={dynRowLabel}>{item.label}</Text></View>
+                <View style={styles.rowLeft}><MaterialCommunityIcons name={item.icon as any} size={20} color={textSoft} /><Text style={dynRowLabel}>{item.label}</Text></View>
                 <Switch value={settings[item.key] as boolean}
                   onValueChange={v => { Haptics.selectionAsync(); update(item.key, v); }}
                   trackColor={{ false: '#D0DAE4', true: ACC }} thumbColor="#fff" />
@@ -356,12 +383,12 @@ export default function ProfileScreen() {
           ))}
           <View style={dynDivider} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={() => setDisappearVisible(true)}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>⏳</Text><Text style={dynRowLabel}>Disappearing Messages</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="timer-sand" size={20} color={textSoft} /><Text style={dynRowLabel}>Disappearing Messages</Text></View>
             <View style={styles.rowRight}><Text style={dynRowValue}>{({off:'Off','24h':'24h','7d':'7d','30d':'30d'})[settings.disappearDefault]}</Text><Text style={styles.chevron}>›</Text></View>
           </Pressable>
           <View style={dynDivider} />
           <View style={dynRow}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>📥</Text><Text style={dynRowLabel}>Auto Download Media</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="download-outline" size={20} color={textSoft} /><Text style={dynRowLabel}>Auto Download Media</Text></View>
             <Switch value={settings.autoDownload} onValueChange={v => { Haptics.selectionAsync(); update('autoDownload', v); }}
               trackColor={{ false: '#D0DAE4', true: ACC }} thumbColor="#fff" />
           </View>
@@ -371,28 +398,28 @@ export default function ProfileScreen() {
         <Text style={dynSectionTitle}>Privacy & Security</Text>
         <View style={dynCard}>
           <View style={dynRow}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>🔐</Text><Text style={dynRowLabel}>Biometric Lock</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="fingerprint" size={20} color={textSoft} /><Text style={dynRowLabel}>Biometric Lock</Text></View>
             <Switch value={settings.biometricLock} onValueChange={handleBiometricToggle}
               trackColor={{ false: '#D0DAE4', true: ACC }} thumbColor="#fff" />
           </View>
           <View style={dynDivider} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={() => setWhoMsgVisible(true)}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>👁</Text><Text style={dynRowLabel}>Who Can Message Me</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="eye-outline" size={20} color={textSoft} /><Text style={dynRowLabel}>Who Can Message Me</Text></View>
             <View style={styles.rowRight}><Text style={dynRowValue}>{{everyone:'Everyone',friends:'Friends Only',nobody:'Nobody'}[settings.whoCanMessage]}</Text><Text style={styles.chevron}>›</Text></View>
           </Pressable>
           <View style={dynDivider} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={() => Alert.alert('Blocked Users', 'No blocked users yet.')}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>🚫</Text><Text style={dynRowLabel}>Blocked Users</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="cancel" size={20} color={textSoft} /><Text style={dynRowLabel}>Blocked Users</Text></View>
             <Text style={styles.chevron}>›</Text>
           </Pressable>
           <View style={dynDivider} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={() => Alert.alert('Change Emoji Key','Coming soon!')}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>🔑</Text><Text style={dynRowLabel}>Change Emoji Key</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="key-outline" size={20} color={textSoft} /><Text style={dynRowLabel}>Change Emoji Key</Text></View>
             <Text style={styles.chevron}>›</Text>
           </Pressable>
           <View style={dynDivider} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={openDevices}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>📱</Text><Text style={dynRowLabel}>Active Devices</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="cellphone" size={20} color={textSoft} /><Text style={dynRowLabel}>Active Devices</Text></View>
             <Text style={styles.chevron}>›</Text>
           </Pressable>
         </View>
@@ -401,13 +428,13 @@ export default function ProfileScreen() {
         <Text style={dynSectionTitle}>Notifications</Text>
         <View style={dynCard}>
           {[
-            { icon:'🔔', label:'Message Notifications', key:'msgNotifs'  as const },
-            { icon:'🔕', label:'Mute Groups',           key:'muteGroups' as const },
-            { icon:'🌙', label:'Do Not Disturb',        key:'dnd'        as const },
+            { icon:'bell-outline',          label:'Message Notifications', key:'msgNotifs'  as const },
+            { icon:'bell-off-outline',       label:'Mute Groups',           key:'muteGroups' as const },
+            { icon:'moon-waning-crescent',   label:'Do Not Disturb',        key:'dnd'        as const },
           ].map((item, i, arr) => (
             <React.Fragment key={item.key}>
               <View style={dynRow}>
-                <View style={styles.rowLeft}><Text style={styles.rowIcon}>{item.icon}</Text><Text style={dynRowLabel}>{item.label}</Text></View>
+                <View style={styles.rowLeft}><MaterialCommunityIcons name={item.icon as any} size={20} color={textSoft} /><Text style={dynRowLabel}>{item.label}</Text></View>
                 <Switch value={settings[item.key] as boolean}
                   onValueChange={v => { Haptics.selectionAsync(); update(item.key, v); }}
                   trackColor={{ false: '#D0DAE4', true: ACC }} thumbColor="#fff" />
@@ -421,16 +448,17 @@ export default function ProfileScreen() {
         <Text style={dynSectionTitle}>Account</Text>
         <View style={dynCard}>
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={handleSignOut}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>🔓</Text><Text style={[dynRowLabel, { color: ERROR }]}>Sign Out</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="logout" size={20} color={ERROR} /><Text style={[dynRowLabel, { color: ERROR }]}>Sign Out</Text></View>
           </Pressable>
           <View style={dynDivider} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={handleDeleteAccount}>
-            <View style={styles.rowLeft}><Text style={styles.rowIcon}>🗑</Text><Text style={[dynRowLabel, { color: ERROR }]}>Delete Account</Text></View>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="delete-outline" size={20} color={ERROR} /><Text style={[dynRowLabel, { color: ERROR }]}>Delete Account</Text></View>
           </Pressable>
         </View>
 
         <View style={{ height: 40 }} />
       </ScrollView>
+      </View>
 
       {/* ── Edit Username Modal ── */}
       <Modal visible={editUsernameVisible} transparent animationType="slide" onRequestClose={() => setEditUsernameVisible(false)}>
@@ -494,8 +522,8 @@ export default function ProfileScreen() {
             {([['everyone','Everyone'],['friends','Friends Only'],['nobody','Nobody']] as const).map(([val, label]) => (
               <Pressable key={val} style={[styles.optionRow, settings.whoCanMessage === val && { backgroundColor: `${ACC}1A`, borderWidth: 1, borderColor: `${ACC}4D` }]}
                 onPress={() => { update('whoCanMessage', val); Haptics.selectionAsync(); setWhoMsgVisible(false); }}>
-                <Text style={[styles.optionText, settings.whoCanMessage === val && { color: ACC, fontWeight: '700' }]}>{label}</Text>
-                {settings.whoCanMessage === val && <Text style={{ color: ACC }}>✓</Text>}
+                <Text style={[styles.optionText, settings.whoCanMessage === val && { color: ACC, fontFamily: 'Inter_700Bold' }]}>{label}</Text>
+                {settings.whoCanMessage === val && <MaterialCommunityIcons name="check" size={18} color={ACC} />}
               </Pressable>
             ))}
           </Pressable>
@@ -510,8 +538,8 @@ export default function ProfileScreen() {
             {([['off','Off'],['24h','24 Hours'],['7d','7 Days'],['30d','30 Days']] as const).map(([val, label]) => (
               <Pressable key={val} style={[styles.optionRow, settings.disappearDefault === val && { backgroundColor: `${ACC}1A`, borderWidth: 1, borderColor: `${ACC}4D` }]}
                 onPress={() => { update('disappearDefault', val); Haptics.selectionAsync(); setDisappearVisible(false); }}>
-                <Text style={[styles.optionText, settings.disappearDefault === val && { color: ACC, fontWeight: '700' }]}>{label}</Text>
-                {settings.disappearDefault === val && <Text style={{ color: ACC }}>✓</Text>}
+                <Text style={[styles.optionText, settings.disappearDefault === val && { color: ACC, fontFamily: 'Inter_700Bold' }]}>{label}</Text>
+                {settings.disappearDefault === val && <MaterialCommunityIcons name="check" size={18} color={ACC} />}
               </Pressable>
             ))}
           </Pressable>
@@ -531,8 +559,9 @@ export default function ProfileScreen() {
               <ScrollView style={{ width: '100%' }} contentContainerStyle={{ gap: 10, paddingTop: 4 }}>
                 {sessions.map((s, i) => (
                   <View key={s.id} style={styles.deviceRow}>
+                    <MaterialCommunityIcons name="cellphone" size={22} color={TEXT_SOFT} />
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.deviceLabel}>{i === 0 ? '📱 This device' : `📱 Device ${i + 1}`}</Text>
+                      <Text style={styles.deviceLabel}>{i === 0 ? 'This device' : `Device ${i + 1}`}</Text>
                       <Text style={styles.deviceSub}>Logged in {timeAgoFull(s.created_at)}</Text>
                     </View>
                     <Pressable
@@ -570,33 +599,31 @@ const styles = StyleSheet.create({
   idAvatarWrap:  { position: 'relative' },
   idAvatarImg:   { width: 64, height: 64, borderRadius: 32, overflow: 'hidden' },
   cameraTag:     { position: 'absolute', bottom: -2, right: -2, borderRadius: 10, width: 22, height: 22, alignItems: 'center', justifyContent: 'center' },
-  cameraIcon:    { fontSize: 12 },
   idInfo:        { flex: 1, gap: 3 },
-  idName:        { fontSize: 18, fontWeight: '800', color: TEXT_DARK },
+  idName:        { fontSize: 18, fontFamily: 'Inter_700Bold', color: TEXT_DARK },
   idSince:       { fontSize: 12, color: TEXT_SOFT },
   idBadge:       { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(76,175,130,0.10)', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(76,175,130,0.2)' },
-  idBadgeText:   { fontSize: 20 },
 
-  sectionTitle:  { fontSize: 12, fontWeight: '700', color: TEXT_SOFT, textTransform: 'uppercase', letterSpacing: 1.2, marginLeft: 6, marginBottom: 4, marginTop: 10 },
+  sectionTitle:  { fontSize: 12, fontFamily: 'Inter_700Bold', color: TEXT_SOFT, textTransform: 'uppercase', letterSpacing: 1.2, marginLeft: 6, marginBottom: 4, marginTop: 10 },
   card:          { backgroundColor: CARD_BG, borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(0,0,0,0.05)' },
   divider:       { height: 1, backgroundColor: 'rgba(0,0,0,0.04)', marginLeft: 54 },
 
   row:           { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14 },
   rowLeft:       { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
   rowRight:      { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  rowIcon:       { fontSize: 18, width: 26, textAlign: 'center' },
-  rowLabel:      { fontSize: 15, fontWeight: '500', color: TEXT_DARK },
+  rowIcon:       { width: 22, alignItems: 'center' as const, justifyContent: 'center' as const },
+  rowLabel:      { fontSize: 15, fontFamily: 'Inter_500Medium', color: TEXT_DARK },
   rowValue:      { fontSize: 13, color: TEXT_SOFT },
-  chevron:       { fontSize: 20, color: TEXT_SOFT, fontWeight: '400', marginLeft: 2 },
+  chevron:       { fontSize: 20, color: TEXT_SOFT, fontFamily: 'Inter_400Regular', marginLeft: 2 },
 
   // Modals
   modalOverlay:  { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
   modalSheet:    { backgroundColor: CARD_BG, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40, gap: 16 },
-  modalTitle:    { fontSize: 18, fontWeight: '800', color: TEXT_DARK },
+  modalTitle:    { fontSize: 18, fontFamily: 'Inter_700Bold', color: TEXT_DARK },
   modalSub:      { fontSize: 13, color: TEXT_SOFT },
   modalInput:    { borderWidth: 1.5, borderColor: 'rgba(0,0,0,0.1)', borderRadius: 12, padding: 14, fontSize: 15, color: TEXT_DARK, backgroundColor: BG },
   modalBtn:      { borderRadius: 14, padding: 15, alignItems: 'center' },
-  modalBtnText:  { color: '#fff', fontSize: 15, fontWeight: '700' },
+  modalBtnText:  { color: '#fff', fontSize: 15, fontFamily: 'Inter_700Bold' },
 
   qrWrap:        { backgroundColor: '#fff', padding: 16, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(0,0,0,0.07)' },
 
@@ -606,12 +633,12 @@ const styles = StyleSheet.create({
 
   optionRow:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 14, paddingHorizontal: 16, backgroundColor: '#F4F6F8', borderRadius: 12 },
   optionRowActive:{ borderWidth: 1 },
-  optionText:    { fontSize: 15, fontWeight: '500', color: TEXT_DARK },
-  optionTextActive:{ fontWeight: '700' },
+  optionText:    { fontSize: 15, fontFamily: 'Inter_500Medium', color: TEXT_DARK },
+  optionTextActive:{ fontFamily: 'Inter_700Bold' },
 
   deviceRow:     { flexDirection: 'row', alignItems: 'center', backgroundColor: BG, borderRadius: 12, padding: 14, gap: 12 },
-  deviceLabel:   { fontSize: 14, fontWeight: '600', color: TEXT_DARK },
+  deviceLabel:   { fontSize: 14, fontFamily: 'Inter_600SemiBold', color: TEXT_DARK },
   deviceSub:     { fontSize: 12, color: TEXT_SOFT, marginTop: 2 },
   revokeBtn:     { backgroundColor: '#FEF0F1', paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8 },
-  revokeBtnText: { color: ERROR, fontSize: 13, fontWeight: '700' },
+  revokeBtnText: { color: ERROR, fontSize: 13, fontFamily: 'Inter_700Bold' },
 });

@@ -43,17 +43,20 @@ const STORAGE_KEY = 'privy_app_settings';
 // ─── Context ─────────────────────────────────────────────────────────────────
 interface SettingsContextType {
   settings: AppSettings;
+  isLoaded: boolean;
   update: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
 }
 
 const SettingsContext = createContext<SettingsContextType>({
   settings: DEFAULTS,
+  isLoaded: false,
   update: () => {},
 });
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = useState<AppSettings>(DEFAULTS);
+  const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -61,6 +64,7 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
         const stored = await SecureStore.getItemAsync(STORAGE_KEY);
         if (stored) setSettings({ ...DEFAULTS, ...JSON.parse(stored) });
       } catch {}
+      finally { setIsLoaded(true); }
     })();
   }, []);
 
@@ -73,7 +77,7 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <SettingsContext.Provider value={{ settings, update }}>
+    <SettingsContext.Provider value={{ settings, isLoaded, update }}>
       {children}
     </SettingsContext.Provider>
   );
