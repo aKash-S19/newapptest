@@ -2,9 +2,57 @@
 
 A private, end-to-end encrypted messaging app built with Expo (React Native) and Supabase.
 
+Contribution note: land small docs/chore updates on main regularly to keep the GitHub contribution graph active (green).
+
 ---
 
 ## Changelog
+
+### Mar 20 2026 — Group Chat Launch, Stability Fixes, and UI Refresh
+
+#### Group Chat Backend (Supabase + Edge Function)
+- Added full group chat foundation: groups, memberships, roles, bans, invite links, join requests, key envelopes, key rotations, group messages, receipts, typing presence, and reports
+- Extended `supabase/functions/auth/index.ts` with group actions:
+	- create/list groups
+	- create/join invites and join-request approval flow
+	- member management (add, set role, mute, kick, ban)
+	- group settings (announcement mode, invite approval, forwarding restriction)
+	- rotate group key, fetch group state, send/get messages, typing and receipt updates, report user
+- Added schema-cache resiliency:
+	- explicit `reload-schema-cache` edge action
+	- best-effort schema reload calls before group actions
+	- retry path for transient PostgREST cache misses
+
+#### New/Updated Migrations
+- `20260320090000_group_chat_foundation.sql`
+- `20260320093000_reload_postgrest_schema.sql`
+- `20260320094000_reload_schema_cache_fn.sql`
+- `20260320101000_group_tables_backfill.sql`
+
+#### Client Group E2EE and Reliability
+- Added `lib/group-e2ee.ts` for group key generation, envelope encryption/decryption, and local key persistence
+- Fixed SecureStore key format compatibility on Android (only allowed key characters)
+- Added safe fallback handling to avoid SecureStore crashes from legacy/invalid key names
+- Enhanced `lib/supabase.ts` auth-function caller with schema-cache aware retry + reload fallback
+
+#### Group UI (Modernized)
+- Added `app/(tabs)/groups.tsx` with:
+	- modern hero section and quick action pills
+	- create-group and join-by-link flows
+	- improved group list rows, empty states, and unread indicators
+- Added `app/group/[id].tsx` with:
+	- cleaner messenger-style header and chat layout
+	- refined bubble styling and timestamps
+	- keyboard-safe multiline composer
+	- collapsible admin tools panel
+- Routing updates:
+	- groups tab in `app/(tabs)/_layout.tsx`
+	- group chat stack screen in `app/_layout.tsx`
+
+#### Operational Notes
+- Supabase migrations pushed and `auth` function deployed successfully
+- For Expo cache reset + tunnel startup, use:
+	- `npx expo start -c --tunnel`
 
 ### Mar 7 2026 — E2EE Chat, File Sharing, Onboarding & More
 
