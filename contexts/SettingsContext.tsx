@@ -1,5 +1,7 @@
 import * as SecureStore from 'expo-secure-store';
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+
+import { callAuthFunction } from '@/lib/supabase';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface AppSettings {
@@ -14,12 +16,15 @@ export interface AppSettings {
   disappearDefault: 'off' | '24h' | '7d' | '30d';
   autoDownload:     boolean;
   // Privacy & Security
-  biometricLock:    boolean;
-  whoCanMessage:    'everyone' | 'friends' | 'nobody';
+  biometricLock:       boolean;
+  whoCanMessage:       'everyone' | 'friends' | 'nobody';
+  whoCanAddToGroup:    'anyone' | 'friends_only' | 'no_one';
   // Notifications
   msgNotifs:        boolean;
   muteGroups:       boolean;
   dnd:              boolean;
+  notificationSound: 'default' | 'silent';
+  chatCustomizations: Record<string, { color?: string; nickname?: string }>;
 }
 
 const DEFAULTS: AppSettings = {
@@ -31,11 +36,14 @@ const DEFAULTS: AppSettings = {
   typingIndicator:  true,
   disappearDefault: 'off',
   autoDownload:     false,
-  biometricLock:    false,
-  whoCanMessage:    'everyone',
+  biometricLock:       false,
+  whoCanMessage:       'everyone',
+  whoCanAddToGroup:    'anyone',
   msgNotifs:        true,
   muteGroups:       false,
   dnd:              false,
+  notificationSound: 'default',
+  chatCustomizations: {},
 };
 
 const STORAGE_KEY = 'privy_app_settings';
@@ -45,18 +53,24 @@ interface SettingsContextType {
   settings: AppSettings;
   isLoaded: boolean;
   update: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
+  setAll: (next: AppSettings) => void;
+  setSyncToken: (token: string | null) => void;
 }
 
 const SettingsContext = createContext<SettingsContextType>({
   settings: DEFAULTS,
   isLoaded: false,
   update: () => {},
+  setAll: () => {},
+  setSyncToken: () => {},
 });
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = useState<AppSettings>(DEFAULTS);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [syncToken, setSyncToken] = useState<string | null>(null);
+  const syncInitRef = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -68,16 +82,44 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     })();
   }, []);
 
+  const setAll = useCallback((next: AppSettings) => {
+    setSettings(next);
+    SecureStore.setItemAsync(STORAGE_KEY, JSON.stringify(next)).catch(() => {});
+  }, []);
+
   const update = useCallback(<K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setSettings(prev => {
       const next = { ...prev, [key]: value };
       SecureStore.setItemAsync(STORAGE_KEY, JSON.stringify(next)).catch(() => {});
+      if (syncToken) {
+        callAuthFunction({ action: 'update-settings', sessionToken: syncToken, settings: next }).catch(() => {});
+      }
       return next;
     });
-  }, []);
+  }, [syncToken]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (!syncToken) { syncInitRef.current = false; return; }
+    if (syncInitRef.current) return;
+    syncInitRef.current = true;
+    (async () => {
+      try {
+        const res = await callAuthFunction({ action: 'get-settings', sessionToken: syncToken });
+        const server = res?.settings ?? null;
+        if (server) {
+          const merged = { ...DEFAULTS, ...settings, ...server } as AppSettings;
+          setAll(merged);
+          await callAuthFunction({ action: 'update-settings', sessionToken: syncToken, settings: merged });
+        } else {
+          await callAuthFunction({ action: 'update-settings', sessionToken: syncToken, settings });
+        }
+      } catch {}
+    })();
+  }, [isLoaded, syncToken, settings, setAll]);
 
   return (
-    <SettingsContext.Provider value={{ settings, isLoaded, update }}>
+    <SettingsContext.Provider value={{ settings, isLoaded, update, setAll, setSyncToken }}>
       {children}
     </SettingsContext.Provider>
   );

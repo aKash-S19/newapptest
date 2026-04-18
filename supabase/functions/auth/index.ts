@@ -12,7 +12,7 @@ const ok   = (body: unknown) =>
 const fail = (msg: string, status = 400) =>
   new Response(JSON.stringify({ error: msg }), { status, headers: { "Content-Type": "application/json", ...CORS } });
 
-function db() {
+function adminDb() {
   return createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -25,12 +25,270 @@ function token() {
   return Array.from(b).map(x => x.toString(16).padStart(2, "0")).join("");
 }
 
+const PIN_HASH_PREFIX = "pbkdf2_sha256";
+const PIN_HASH_ITERATIONS = 210_000;
+const SESSION_HASH_PREFIX = "sha256";
+const DEVICE_HASH_PREFIX = "sha256";
+const LEGACY_HEX_HASH_RE = /^[a-f0-9]{64}$/i;
+const ENCRYPTED_PAYLOAD_RE = /^[A-Za-z0-9+/]+={0,2}\.[A-Za-z0-9+/]+={0,2}$/;
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  if (!hex || hex.length % 2 !== 0 || !/^[a-f0-9]+$/i.test(hex)) return new Uint8Array(0);
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function base64ToBytes(value: string): Uint8Array | null {
+  try {
+    const decoded = atob(value);
+    const out = new Uint8Array(decoded.length);
+    for (let i = 0; i < decoded.length; i++) out[i] = decoded.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function isValidPublicKey(publicKey: string): boolean {
+  const keyBytes = base64ToBytes(publicKey.trim());
+  return !!keyBytes && keyBytes.length === 65 && keyBytes[0] === 0x04;
+}
+
+function isEncryptedPayload(payload: string): boolean {
+  const trimmed = payload.trim();
+  if (!ENCRYPTED_PAYLOAD_RE.test(trimmed)) return false;
+  const [ivB64, ctB64] = trimmed.split(".");
+  const iv = base64ToBytes(ivB64);
+  const ct = base64ToBytes(ctB64);
+  if (!iv || !ct) return false;
+  if (iv.length !== 12) return false;
+  // AES-GCM ciphertext includes a 16-byte auth tag.
+  return ct.length >= 16;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return bytesToHex(new Uint8Array(hashBuffer));
+}
+
+async function hashSessionToken(rawToken: string): Promise<string> {
+  return `${SESSION_HASH_PREFIX}:${await sha256Hex(rawToken)}`;
+}
+
+async function hashDeviceId(deviceId: string): Promise<string> {
+  return `${DEVICE_HASH_PREFIX}:${await sha256Hex(deviceId)}`;
+}
+
 async function hashPin(pin: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(pin);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(pin),
+    "PBKDF2",
+    false,
+    ["deriveBits"],
+  );
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt,
+      iterations: PIN_HASH_ITERATIONS,
+    },
+    keyMaterial,
+    256,
+  );
+  const hashHex = bytesToHex(new Uint8Array(bits));
+  return `${PIN_HASH_PREFIX}$${PIN_HASH_ITERATIONS}$${bytesToHex(salt)}$${hashHex}`;
+}
+
+async function verifyPin(pin: string, storedHash: string): Promise<{ ok: boolean; shouldUpgrade: boolean }> {
+  if (!storedHash) return { ok: false, shouldUpgrade: false };
+
+  if (storedHash.startsWith(`${PIN_HASH_PREFIX}$`)) {
+    const parts = storedHash.split("$");
+    if (parts.length !== 4) return { ok: false, shouldUpgrade: false };
+    const [, iterRaw, saltHex, expectedHex] = parts;
+    const iterations = Number(iterRaw);
+    const salt = hexToBytes(saltHex);
+    const expected = hexToBytes(expectedHex);
+    if (!Number.isFinite(iterations) || iterations < 1000 || salt.length === 0 || expected.length === 0) {
+      return { ok: false, shouldUpgrade: false };
+    }
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(pin),
+      "PBKDF2",
+      false,
+      ["deriveBits"],
+    );
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        salt,
+        iterations,
+      },
+      keyMaterial,
+      expected.length * 8,
+    );
+    const actual = bytesToHex(new Uint8Array(bits));
+    return { ok: actual === expectedHex.toLowerCase(), shouldUpgrade: false };
+  }
+
+  // Backwards compatibility for old unsalted SHA-256 hashes.
+  if (LEGACY_HEX_HASH_RE.test(storedHash)) {
+    const legacyHex = await sha256Hex(pin);
+    return {
+      ok: legacyHex === storedHash.toLowerCase(),
+      shouldUpgrade: true,
+    };
+  }
+
+  return { ok: false, shouldUpgrade: false };
+}
+
+async function requireUser(req: Request, admin: ReturnType<typeof adminDb>) {
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!token) return null;
+  const { data, error } = await admin.auth.getUser(token);
+  if (error || !data?.user) return null;
+  return data.user;
+}
+
+async function userFromSessionToken(sessionToken: string, admin: ReturnType<typeof adminDb>) {
+  if (!sessionToken) return null;
+
+  const hashedToken = await hashSessionToken(sessionToken);
+  let { data: session } = await admin
+    .from("sessions")
+    .select("id, user_id, expires_at, token_hash")
+    .eq("token_hash", hashedToken)
+    .maybeSingle();
+
+  if (!session) {
+    const { data: legacySession } = await admin
+      .from("sessions")
+      .select("id, user_id, expires_at, token_hash")
+      .eq("token_hash", sessionToken)
+      .maybeSingle();
+    session = legacySession ?? null;
+
+    // Migrate legacy plain session token hash in-place.
+    if (session?.id) {
+      await admin
+        .from("sessions")
+        .update({ token_hash: hashedToken })
+        .eq("id", session.id);
+    }
+  }
+
+  if (!session) return null;
+  if (session.expires_at && new Date(session.expires_at) < new Date()) {
+    await admin.from("sessions").delete().eq("id", session.id);
+    return null;
+  }
+
+  const { data: user } = await admin
+    .from("users")
+    .select("id, username, created_at, avatar_url")
+    .eq("id", session.user_id)
+    .maybeSingle();
+  return user ?? null;
+}
+
+async function resolveUser(
+  body: Record<string, unknown>,
+  authUser: Awaited<ReturnType<typeof requireUser>>,
+  admin: ReturnType<typeof adminDb>,
+) {
+  if (authUser?.id) {
+    const { data: user } = await admin
+      .from("users")
+      .select("id, username, created_at, avatar_url")
+      .eq("id", authUser.id)
+      .maybeSingle();
+    if (user) return user;
+  }
+  const sessionToken = typeof body.sessionToken === "string" ? body.sessionToken : "";
+  return userFromSessionToken(sessionToken, admin);
+}
+
+function inviteCode(len = 8) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(len));
+  let out = "";
+  for (let i = 0; i < len; i++) out += alphabet[bytes[i] % alphabet.length];
+  return out;
+}
+
+function isGroupKind(kind: string) {
+  return kind === "avatar" || kind === "banner";
+}
+
+function emailFromUsername(username: string) {
+  const cleaned = username.trim().toLowerCase();
+  return `${cleaned}@privy.local`;
+}
+
+const SETTINGS_FIELDS: Record<string, 'string' | 'boolean' | 'object'> = {
+  accentColor: 'string',
+  darkMode: 'boolean',
+  bubbleStyle: 'string',
+  fontSize: 'string',
+  readReceipts: 'boolean',
+  typingIndicator: 'boolean',
+  disappearDefault: 'string',
+  autoDownload: 'boolean',
+  biometricLock: 'boolean',
+  whoCanMessage: 'string',
+  whoCanAddToGroup: 'string',
+  msgNotifs: 'boolean',
+  muteGroups: 'boolean',
+  dnd: 'boolean',
+  notificationSound: 'string',
+  chatCustomizations: 'object',
+};
+
+function sanitizeChatCustomizations(input: any) {
+  if (!input || typeof input !== 'object') return {};
+  const out: Record<string, { color?: string; nickname?: string }> = {};
+  for (const [chatId, value] of Object.entries(input)) {
+    if (!chatId || typeof value !== 'object' || !value) continue;
+    const v = value as { color?: unknown; nickname?: unknown };
+    const next: { color?: string; nickname?: string } = {};
+    if (typeof v.nickname === 'string') {
+      const n = v.nickname.trim().slice(0, 40);
+      if (n) next.nickname = n;
+    }
+    if (typeof v.color === 'string') {
+      const c = v.color.trim();
+      if (/^#[0-9a-fA-F]{6}$/.test(c)) next.color = c.toUpperCase();
+    }
+    if (next.nickname || next.color) out[chatId] = next;
+  }
+  return out;
+}
+
+function sanitizeSettings(input: any) {
+  if (!input || typeof input !== 'object') return {};
+  const out: Record<string, string | boolean | Record<string, { color?: string; nickname?: string }>> = {};
+  for (const key of Object.keys(SETTINGS_FIELDS)) {
+    const type = SETTINGS_FIELDS[key];
+    const val = input[key];
+    if (type === 'boolean' && typeof val === 'boolean') out[key] = val;
+    if (type === 'string' && typeof val === 'string') out[key] = val;
+    if (type === 'object' && key === 'chatCustomizations') out[key] = sanitizeChatCustomizations(val);
+  }
+  return out;
 }
 
 Deno.serve(async (req: Request) => {
@@ -42,7 +300,9 @@ Deno.serve(async (req: Request) => {
   const { action } = body;
   if (!action) return fail("Missing action");
 
-  const supabase = db();
+  const supabase = adminDb();
+  const authUser = await requireUser(req, supabase);
+  const sessionUser = await resolveUser(body, authUser, supabase);
 
   // ?????? register ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   // ── register ─────────────────────────────────────────────────────────────
@@ -53,15 +313,32 @@ Deno.serve(async (req: Request) => {
     if (!deviceId) return fail("Missing deviceId", 400);
 
     const uname = (username as string).trim().toLowerCase();
-    const dId   = (deviceId  as string).trim();
+    const dIdRaw = (deviceId as string).trim();
+    const dIdHashed = await hashDeviceId(dIdRaw);
     const pin   = Array.isArray(emojiKey) ? (emojiKey as string[]).join("") : String(emojiKey);
     const hashedPin = await hashPin(pin);
+
+    if (body.publicKey && !isValidPublicKey(String(body.publicKey))) {
+      return fail("Invalid public key", 400);
+    }
 
     // Validate username server-side
     if (!/^[a-z0-9_]{4,20}$/.test(uname)) return fail("Invalid username format");
 
-    // Check device not already registered
-    const { data: existingDevice } = await supabase.from("users").select("id").eq("device_hash", dId).limit(1).maybeSingle();
+    // Check device not already registered (supports legacy unhashed entries).
+    let { data: existingDevice } = await supabase.from("users")
+      .select("id")
+      .eq("device_hash", dIdHashed)
+      .limit(1)
+      .maybeSingle();
+    if (!existingDevice) {
+      const { data: legacyDevice } = await supabase.from("users")
+        .select("id")
+        .eq("device_hash", dIdRaw)
+        .limit(1)
+        .maybeSingle();
+      existingDevice = legacyDevice;
+    }
     if (existingDevice) return fail("Device already registered", 409);
 
     // Check username not taken
@@ -73,7 +350,7 @@ Deno.serve(async (req: Request) => {
       .insert({
         username:      uname,
         password_hash: hashedPin,
-        device_hash:   dId,
+        device_hash:   dIdHashed,
       })
       .select("id, username, created_at")
       .single();
@@ -81,8 +358,9 @@ Deno.serve(async (req: Request) => {
     if (error) return fail(error.message, 500);
 
     const sessionToken = token();
+    const sessionTokenHash = await hashSessionToken(sessionToken);
     const exp = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    await supabase.from("sessions").insert({ user_id: newUser.id, token_hash: sessionToken, expires_at: exp });
+    await supabase.from("sessions").insert({ user_id: newUser.id, token_hash: sessionTokenHash, expires_at: exp });
 
     // Store ECDH public key atomically so peers can find it immediately
     if (body.publicKey) {
@@ -103,17 +381,37 @@ Deno.serve(async (req: Request) => {
     if (!emojiKey || !deviceId) return fail("Missing fields");
 
     const pin = Array.isArray(emojiKey) ? (emojiKey as string[]).join("") : String(emojiKey);
-    const hashedPin = await hashPin(pin);
+    const rawDeviceId = (deviceId as string).trim();
+    const hashedDeviceId = await hashDeviceId(rawDeviceId);
 
-    const { data: user, error: userError } = await supabase.from("users")
-      .select("id, username, password_hash, created_at")
-      .eq("device_hash", (deviceId as string).trim()).limit(1).maybeSingle();
+    let { data: user, error: userError } = await supabase.from("users")
+      .select("id, username, password_hash, created_at, device_hash")
+      .eq("device_hash", hashedDeviceId).limit(1).maybeSingle();
 
-    if (userError || !user || user.password_hash !== hashedPin) return fail("Invalid credentials", 401);
+    if (!user && !userError) {
+      const { data: legacyUser, error: legacyError } = await supabase.from("users")
+        .select("id, username, password_hash, created_at, device_hash")
+        .eq("device_hash", rawDeviceId).limit(1).maybeSingle();
+      user = legacyUser;
+      userError = legacyError;
+    }
+
+    if (userError || !user) return fail("Invalid credentials", 401);
+
+    const pinCheck = await verifyPin(pin, user.password_hash ?? "");
+    if (!pinCheck.ok) return fail("Invalid credentials", 401);
+
+    const userUpdates: Record<string, unknown> = {};
+    if (pinCheck.shouldUpgrade) userUpdates.password_hash = await hashPin(pin);
+    if (user.device_hash !== hashedDeviceId) userUpdates.device_hash = hashedDeviceId;
+    if (Object.keys(userUpdates).length > 0) {
+      await supabase.from("users").update(userUpdates).eq("id", user.id);
+    }
 
     const sessionToken = token();
+    const sessionTokenHash = await hashSessionToken(sessionToken);
     const exp = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    await supabase.from("sessions").insert({ user_id: user.id, token_hash: sessionToken, expires_at: exp });
+    await supabase.from("sessions").insert({ user_id: user.id, token_hash: sessionTokenHash, expires_at: exp });
 
     return ok({ success: true, user: { id: user.id, username: user.username, created_at: user.created_at }, sessionToken });
   }
@@ -123,25 +421,43 @@ Deno.serve(async (req: Request) => {
     const { username, emojiKey, deviceId } = body;
     if (!username || !emojiKey || !deviceId) return fail("Missing fields");
 
+    if (body.publicKey && !isValidPublicKey(String(body.publicKey))) {
+      return fail("Invalid public key", 400);
+    }
+
     const uname = (username as string).trim().toLowerCase();
     const pin = Array.isArray(emojiKey) ? (emojiKey as string[]).join("") : String(emojiKey);
-    const hashedPin = await hashPin(pin);
+    const rawDeviceId = (deviceId as string).trim();
+    const hashedDeviceId = await hashDeviceId(rawDeviceId);
 
     // Look up by username
     const { data: user, error: userError } = await supabase.from("users")
-      .select("id, username, password_hash, created_at")
+      .select("id, username, password_hash, created_at, device_hash")
       .eq("username", uname).limit(1).maybeSingle();
 
-    if (userError || !user || user.password_hash !== hashedPin) return fail("Invalid username or pin", 401);
+    if (userError || !user) return fail("Invalid username or pin", 401);
 
-    // Update their device_hash to the new device so future logins work seamlessly
-    await supabase.from("users").update({ device_hash: (deviceId as string).trim() }).eq("id", user.id);
+    const updates: Record<string, unknown> = {};
+    if (!user.password_hash) {
+      updates.password_hash = await hashPin(pin);
+    } else {
+      const pinCheck = await verifyPin(pin, user.password_hash);
+      if (!pinCheck.ok) return fail("Invalid username or pin", 401);
+      if (pinCheck.shouldUpgrade) updates.password_hash = await hashPin(pin);
+    }
+
+    // Update their device hash to the active device fingerprint.
+    if (user.device_hash !== hashedDeviceId) updates.device_hash = hashedDeviceId;
+    if (Object.keys(updates).length > 0) {
+      await supabase.from("users").update(updates).eq("id", user.id);
+    }
 
     // Clear old sessions and issue a new one
     await supabase.from("sessions").delete().eq("user_id", user.id);
     const sessionToken = token();
+    const sessionTokenHash = await hashSessionToken(sessionToken);
     const exp = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    await supabase.from("sessions").insert({ user_id: user.id, token_hash: sessionToken, expires_at: exp });
+    await supabase.from("sessions").insert({ user_id: user.id, token_hash: sessionTokenHash, expires_at: exp });
 
     // Store ECDH public key atomically
     if (body.publicKey) {
@@ -167,6 +483,11 @@ Deno.serve(async (req: Request) => {
   if (action === "recover-verify") {
     const { username, answer, newEmojiKey } = body;
     if (!username || !answer || !newEmojiKey) return fail("Missing fields");
+
+    if (body.publicKey && !isValidPublicKey(String(body.publicKey))) {
+      return fail("Invalid public key", 400);
+    }
+
     const uname = (username as string).trim().toLowerCase();
     const { data: user } = await supabase.from("users").select("id, username, security_answer_hash, created_at").eq("username", uname).limit(1).maybeSingle();
     if (!user) return fail("Invalid credentials", 401);
@@ -176,8 +497,9 @@ Deno.serve(async (req: Request) => {
     await supabase.from("users").update({ password_hash: hashedPin }).eq("id", user.id);
     await supabase.from("sessions").delete().eq("user_id", user.id);
     const sessionToken = token();
+    const sessionTokenHash = await hashSessionToken(sessionToken);
     const exp = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    await supabase.from("sessions").insert({ user_id: user.id, token_hash: sessionToken, expires_at: exp });
+    await supabase.from("sessions").insert({ user_id: user.id, token_hash: sessionTokenHash, expires_at: exp });
 
     if (body.publicKey) {
       await supabase.from("user_public_keys").upsert({
@@ -192,33 +514,32 @@ Deno.serve(async (req: Request) => {
 
   // ?????? signout ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   if (action === "signout") {
-    const { sessionToken } = body as { sessionToken?: string };
-    if (sessionToken) await supabase.from("sessions").delete().eq("token_hash", sessionToken);
+    const sessionToken = typeof body.sessionToken === "string" ? body.sessionToken.trim() : "";
+    if (sessionToken) {
+      const sessionTokenHash = await hashSessionToken(sessionToken);
+      await supabase
+        .from("sessions")
+        .delete()
+        .in("token_hash", [sessionTokenHash, sessionToken]);
+    }
     return ok({ success: true });
   }
 
   // ?????? delete-account ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   if (action === "delete-account") {
-    const { sessionToken, emojiKey } = body;
-    if (!sessionToken || !emojiKey) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const { data: user } = await supabase.from("users").select("password_hash").eq("id", session.user_id).limit(1).maybeSingle();
-    if (!user) return fail("User not found", 404);
-    const pin = Array.isArray(emojiKey) ? (emojiKey as string[]).join("") : String(emojiKey);
-    const hashedPin = await hashPin(pin);
-    if (user.password_hash !== hashedPin) return fail("Invalid credentials", 401);
-    await supabase.from("users").delete().eq("id", session.user_id);
+    if (!sessionUser) return fail("Unauthorized", 401);
+    const uid = sessionUser.id;
+    await supabase.from("users").delete().eq("id", uid);
+    await supabase.from("sessions").delete().eq("user_id", uid);
+    if (authUser?.id) await supabase.auth.admin.deleteUser(authUser.id);
     return ok({ success: true });
   }
 
   // ── find-user ─────────────────────────────────────────────────────────────
   if (action === "find-user") {
-    const { query, sessionToken } = body as { query?: string; sessionToken?: string };
-    if (!sessionToken) return fail("Unauthorized", 401);
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    const { query } = body as { query?: string };
+    if (!sessionUser) return fail("Unauthorized", 401);
+    const uid = sessionUser.id;
     if (!query || (query as string).trim().length < 2) return ok({ users: [] });
     const { data: users } = await supabase.from("users")
       .select("id, username, created_at, avatar_url")
@@ -281,28 +602,28 @@ Deno.serve(async (req: Request) => {
     return ok({ available: !data });
   }
 
+  // ── get-session-user ─────────────────────────────────────────────────────
+  if (action === "get-session-user") {
+    const token = typeof body.sessionToken === "string" ? body.sessionToken : "";
+    const user = await userFromSessionToken(token, supabase);
+    if (!user) return fail("Unauthorized", 401);
+    return ok({ user });
+  }
+
   // ?????? check-device ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   // ── check-device ─────────────────────────────────────────────────────────────────
   if (action === "check-device") {
-    const { deviceId } = body as { deviceId?: string };
-    if (!deviceId) return ok({ found: false });
-    const { data } = await supabase.from("users")
-      .select("id, username, created_at")
-      .eq("device_hash", (deviceId as string).trim()).maybeSingle();
-    if (!data) return ok({ found: false });
-    return ok({ found: true, user: { id: data.id, username: data.username, created_at: data.created_at } });
+    return fail("Deprecated", 410);
   }
 
   // ── send-request ─────────────────────────────────────────────────────────────
   if (action === "send-request") {
-    const { sessionToken, toUserId } = body;
-    if (!sessionToken || !toUserId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    if (session.user_id === toUserId) return fail("Cannot send request to yourself", 400);
+    const { toUserId } = body;
+    if (!sessionUser || !toUserId) return fail("Missing fields", 400);
+    if (sessionUser.id === toUserId) return fail("Cannot send request to yourself", 400);
     // Upsert so re-sending a declined request works
     const { error } = await supabase.from("friend_requests")
-      .upsert({ sender_id: session.user_id, receiver_id: toUserId as string, status: "pending", updated_at: new Date().toISOString() },
+      .upsert({ sender_id: sessionUser.id, receiver_id: toUserId as string, status: "pending", updated_at: new Date().toISOString() },
         { onConflict: "sender_id,receiver_id" });
     if (error) return fail(error.message, 500);
     return ok({ success: true });
@@ -310,11 +631,9 @@ Deno.serve(async (req: Request) => {
 
   // ── accept-request ───────────────────────────────────────────────────────────
   if (action === "accept-request") {
-    const { sessionToken, requestId } = body;
-    if (!sessionToken || !requestId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    const { requestId } = body;
+    if (!sessionUser || !requestId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
 
     // Fetch the request first (need sender_id to create the chat)
     const { data: req } = await supabase.from("friend_requests")
@@ -351,36 +670,30 @@ Deno.serve(async (req: Request) => {
 
   // ── decline-request ──────────────────────────────────────────────────────────
   if (action === "decline-request") {
-    const { sessionToken, requestId } = body;
-    if (!sessionToken || !requestId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
+    const { requestId } = body;
+    if (!sessionUser || !requestId) return fail("Missing fields", 400);
     const { error } = await supabase.from("friend_requests")
       .update({ status: "declined", updated_at: new Date().toISOString() })
-      .eq("id", requestId as string).eq("receiver_id", session.user_id).eq("status", "pending");
+      .eq("id", requestId as string).eq("receiver_id", sessionUser.id).eq("status", "pending");
     if (error) return fail(error.message, 500);
     return ok({ success: true });
   }
 
   // ── cancel-request ───────────────────────────────────────────────────────────
   if (action === "cancel-request") {
-    const { sessionToken, requestId } = body;
-    if (!sessionToken || !requestId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
+    const { requestId } = body;
+    if (!sessionUser || !requestId) return fail("Missing fields", 400);
     const { error } = await supabase.from("friend_requests")
-      .delete().eq("id", requestId as string).eq("sender_id", session.user_id);
+      .delete().eq("id", requestId as string).eq("sender_id", sessionUser.id);
     if (error) return fail(error.message, 500);
     return ok({ success: true });
   }
 
   // ── remove-friend ────────────────────────────────────────────────────────────
   if (action === "remove-friend") {
-    const { sessionToken, peerId } = body;
-    if (!sessionToken || !peerId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    const { peerId } = body;
+    if (!sessionUser || !peerId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
     // Delete the accepted friend_request row in whichever direction it exists
     const { error } = await supabase.from("friend_requests").delete()
       .or(`and(sender_id.eq.${uid},receiver_id.eq.${peerId as string}),and(sender_id.eq.${peerId as string},receiver_id.eq.${uid})`);
@@ -390,11 +703,8 @@ Deno.serve(async (req: Request) => {
 
   // ── get-requests ─────────────────────────────────────────────────────────────
   if (action === "get-requests") {
-    const { sessionToken } = body;
-    if (!sessionToken) return fail("Missing session", 401);
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    if (!sessionUser) return fail("Unauthorized", 401);
+    const uid = sessionUser.id;
 
     const { data: received } = await supabase.from("friend_requests")
       .select("id, status, created_at, sender:sender_id(id, username)")
@@ -407,82 +717,404 @@ Deno.serve(async (req: Request) => {
     return ok({ received: received ?? [], sent: sent ?? [] });
   }
 
+  // ── get-group-requests ───────────────────────────────────────────────────
+  if (action === "get-group-requests") {
+    if (!sessionUser) return fail("Unauthorized", 401);
+    const uid = sessionUser.id;
+
+    let groupReqs: any[] | null = null;
+    let reqError: any = null;
+    let hasAddedBy = true;
+
+    ({ data: groupReqs, error: reqError } = await supabase
+      .from("group_join_requests")
+      .select("id, group_id, status, created_at, user_id, added_by")
+      .eq("user_id", uid)
+      .eq("status", "pending")
+      .order("created_at", { ascending: false }));
+
+    if (reqError && String(reqError.message ?? "").toLowerCase().includes("added_by")) {
+      hasAddedBy = false;
+      ({ data: groupReqs, error: reqError } = await supabase
+        .from("group_join_requests")
+        .select("id, group_id, status, created_at, user_id")
+        .eq("user_id", uid)
+        .eq("status", "pending")
+        .order("created_at", { ascending: false }));
+    }
+
+    if (reqError) return fail(reqError.message, 500);
+    if (!groupReqs || groupReqs.length === 0) return ok({ groupRequests: [] });
+
+    const groupIds = [...new Set(groupReqs.map((r: any) => r.group_id as string).filter(Boolean))];
+    const requesterIds = [...new Set(groupReqs.map((r: any) => r.user_id as string).filter(Boolean))];
+    const adderIds = hasAddedBy
+      ? [...new Set(groupReqs.map((r: any) => r.added_by as string).filter(Boolean))]
+      : [];
+
+    const { data: groups } = groupIds.length > 0
+      ? await supabase.from("groups").select("id, name, description").in("id", groupIds)
+      : { data: [] };
+    const groupMap = new Map<string, { id: string; name: string; description: string | null }>();
+    (groups ?? []).forEach((g: any) => {
+      groupMap.set(g.id, {
+        id: g.id,
+        name: g.name ?? "Group",
+        description: g.description ?? null,
+      });
+    });
+
+    const { data: members } = groupIds.length > 0
+      ? await supabase.from("group_members").select("group_id, user_id").in("group_id", groupIds)
+      : { data: [] };
+
+    const memberIds = [...new Set((members ?? []).map((m: any) => m.user_id as string).filter(Boolean))];
+    const allUserIds = [...new Set([...requesterIds, ...adderIds, ...memberIds])];
+    const { data: users } = allUserIds.length > 0
+      ? await supabase.from("users").select("id, username").in("id", allUserIds)
+      : { data: [] };
+
+    const userMap = new Map<string, { id: string; username: string }>();
+    (users ?? []).forEach((u: any) => {
+      userMap.set(u.id, {
+        id: u.id,
+        username: u.username ?? "Unknown",
+      });
+    });
+
+    const groupMemberMap = new Map<string, string[]>();
+    (members ?? []).forEach((m: any) => {
+      const list = groupMemberMap.get(m.group_id) ?? [];
+      list.push(m.user_id);
+      groupMemberMap.set(m.group_id, list);
+    });
+
+    const payload = groupReqs.map((r: any) => {
+      const g = groupMap.get(r.group_id) ?? {
+        id: r.group_id,
+        name: "Group",
+        description: null,
+      };
+      const reqUser = userMap.get(r.user_id) ?? { id: r.user_id ?? "", username: "Unknown" };
+      const addedById = (hasAddedBy ? r.added_by : "") || "";
+      const addedByUser = addedById
+        ? (userMap.get(addedById) ?? { id: addedById, username: "Unknown" })
+        : { id: "", username: "Unknown" };
+
+      return {
+        id: r.id,
+        group_id: r.group_id,
+        status: r.status,
+        created_at: r.created_at,
+        added_by: addedById,
+        group: g,
+        user: reqUser,
+        added_by_user: addedByUser,
+        group_members: (groupMemberMap.get(r.group_id) ?? []).map((memberId) => {
+          const member = userMap.get(memberId) ?? { id: memberId, username: "Unknown" };
+          return { user: member };
+        }),
+      };
+    });
+
+    return ok({ groupRequests: payload });
+  }
+
+  // ── accept-group-request ─────────────────────────────────────────────────
+  if (action === "accept-group-request") {
+    const { requestId } = body as { requestId?: string };
+    if (!sessionUser || !requestId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: req } = await supabase
+      .from("group_join_requests")
+      .select("id, group_id, user_id, status")
+      .eq("id", requestId)
+      .eq("user_id", uid)
+      .eq("status", "pending")
+      .maybeSingle();
+    if (!req) return fail("Request not found or already actioned", 404);
+
+    const { error: memberError } = await supabase
+      .from("group_members")
+      .upsert(
+        [{ group_id: req.group_id, user_id: uid, role: "member" }],
+        { onConflict: "group_id,user_id" },
+      );
+    if (memberError) return fail(memberError.message, 500);
+
+    const { error: reqError } = await supabase
+      .from("group_join_requests")
+      .update({ status: "accepted" })
+      .eq("id", requestId)
+      .eq("user_id", uid);
+    if (reqError) return fail(reqError.message, 500);
+
+    return ok({ success: true, groupId: req.group_id });
+  }
+
+  // ── decline-group-request ────────────────────────────────────────────────
+  if (action === "decline-group-request") {
+    const { requestId } = body as { requestId?: string };
+    if (!sessionUser || !requestId) return fail("Missing fields", 400);
+
+    const { data: req } = await supabase
+      .from("group_join_requests")
+      .select("id")
+      .eq("id", requestId)
+      .eq("user_id", sessionUser.id)
+      .eq("status", "pending")
+      .maybeSingle();
+    if (!req) return fail("Request not found or already actioned", 404);
+
+    const { error } = await supabase
+      .from("group_join_requests")
+      .update({ status: "declined" })
+      .eq("id", requestId)
+      .eq("user_id", sessionUser.id);
+    if (error) return fail(error.message, 500);
+
+    return ok({ success: true });
+  }
+
+  // ── report-group-request ─────────────────────────────────────────────────
+  if (action === "report-group-request") {
+    const { requestId, groupId, reportedUserId } = body as {
+      requestId?: string;
+      groupId?: string;
+      reportedUserId?: string;
+    };
+    if (!sessionUser || !requestId || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    let reqRow: any = null;
+    let reqError: any = null;
+    ({ data: reqRow, error: reqError } = await supabase
+      .from("group_join_requests")
+      .select("id, group_id, user_id, status, added_by")
+      .eq("id", requestId)
+      .eq("user_id", uid)
+      .maybeSingle());
+
+    if (reqError && String(reqError.message ?? "").toLowerCase().includes("added_by")) {
+      ({ data: reqRow, error: reqError } = await supabase
+        .from("group_join_requests")
+        .select("id, group_id, user_id, status")
+        .eq("id", requestId)
+        .eq("user_id", uid)
+        .maybeSingle());
+    }
+
+    if (reqError) return fail(reqError.message, 500);
+    if (!reqRow) return fail("Request not found", 404);
+
+    const targetUserId = (reportedUserId ?? reqRow.added_by ?? "").trim();
+    if (!targetUserId) return fail("Missing reported user", 400);
+
+    const reason = "Added without consent";
+    const { error: reportError } = await supabase.from("group_reports").insert([{
+      group_id: groupId,
+      reporter_id: uid,
+      reported_user_id: targetUserId,
+      reason,
+    }]);
+    if (reportError) return fail(reportError.message, 500);
+
+    const { error: declineError } = await supabase
+      .from("group_join_requests")
+      .update({ status: "declined" })
+      .eq("id", requestId)
+      .eq("user_id", uid);
+    if (declineError) return fail(declineError.message, 500);
+
+    const { count: totalReports } = await supabase
+      .from("group_reports")
+      .select("id", { count: "exact", head: true })
+      .eq("reported_user_id", targetUserId);
+
+    const banned = (totalReports ?? 0) >= 5;
+    if (banned) {
+      const { data: existingBan } = await supabase
+        .from("group_bans")
+        .select("id")
+        .eq("user_id", targetUserId)
+        .eq("group_id", groupId)
+        .maybeSingle();
+      if (!existingBan) {
+        await supabase.from("group_bans").insert([{
+          user_id: targetUserId,
+          group_id: groupId,
+          reason: "Auto-banned: 5+ reports for adding users without consent",
+        }]);
+      }
+    }
+
+    return ok({ success: true, banned });
+  }
+
   // ── update-username ──────────────────────────────────────────────────────────
   if (action === "update-username") {
-    const { sessionToken, newUsername } = body;
-    if (!sessionToken || !newUsername) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
+    const { newUsername } = body;
+    if (!sessionUser || !newUsername) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
     const uname = (newUsername as string).trim().toLowerCase();
     if (!/^[a-z0-9_]{3,20}$/.test(uname)) return fail("Username must be 3-20 chars, letters/numbers/underscore");
-    const { data: taken } = await supabase.from("users").select("id").eq("username", uname).neq("id", session.user_id).maybeSingle();
+    const { data: current } = await supabase.from("users").select("username").eq("id", uid).maybeSingle();
+    if (!current) return fail("User not found", 404);
+    if (current.username === uname) return ok({ success: true, user: { id: uid, username: uname } });
+
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { count: recentCount } = await supabase.from("user_username_history")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", uid)
+      .gte("changed_at", since);
+    if ((recentCount ?? 0) >= 2) return fail("Username can only be changed twice per month", 429);
+
+    const { data: taken } = await supabase.from("users").select("id").eq("username", uname).neq("id", uid).maybeSingle();
     if (taken) return fail("Username already taken", 409);
     const { data: updated, error } = await supabase.from("users")
-      .update({ username: uname }).eq("id", session.user_id)
+      .update({ username: uname }).eq("id", uid)
       .select("id, username, created_at, avatar_url").single();
     if (error) return fail(error.message, 500);
+
+    if (authUser?.id) {
+      await supabase.auth.admin.updateUserById(uid, { email: emailFromUsername(uname) });
+    }
+
+    await supabase.from("user_username_history").insert({
+      user_id: uid,
+      old_username: current.username,
+      new_username: uname,
+      changed_at: new Date().toISOString(),
+    });
+
     return ok({ success: true, user: updated });
+  }
+
+  // ── get-username-history ───────────────────────────────────────────────────
+  if (action === "get-username-history") {
+    const { userId, userIds } = body as { userId?: string; userIds?: string[] };
+    if (!sessionUser) return fail("Unauthorized", 401);
+
+    const ids = Array.isArray(userIds) && userIds.length > 0 ? userIds : (userId ? [userId] : []);
+    if (ids.length === 0) return fail("Missing userId", 400);
+
+    const { data: rows } = await supabase.from("user_username_history")
+      .select("user_id, old_username, new_username, changed_at")
+      .in("user_id", ids)
+      .order("changed_at", { ascending: false });
+
+    const historyMap: Record<string, string[]> = {};
+    (rows ?? []).forEach((row: any) => {
+      const list = historyMap[row.user_id] ?? [];
+      if (!list.includes(row.old_username)) list.push(row.old_username);
+      historyMap[row.user_id] = list.slice(0, 3);
+    });
+
+    return ok({ history: historyMap });
   }
 
   // ── update-avatar ────────────────────────────────────────────────────────────
   if (action === "update-avatar") {
-    const { sessionToken, avatarUrl } = body;
-    if (!sessionToken || !avatarUrl) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
+    const { avatarUrl } = body;
+    if (!sessionUser || !avatarUrl) return fail("Missing fields", 400);
     const { data: updated, error } = await supabase.from("users")
-      .update({ avatar_url: avatarUrl as string }).eq("id", session.user_id)
+      .update({ avatar_url: avatarUrl as string }).eq("id", sessionUser.id)
       .select("id, username, created_at, avatar_url").single();
     if (error) return fail(error.message, 500);
     return ok({ success: true, user: updated });
   }
 
+  // ── get-settings ───────────────────────────────────────────────────────────
+  if (action === "get-settings") {
+    if (!sessionUser) return fail("Unauthorized", 401);
+    const { data } = await supabase.from("user_settings")
+      .select("settings").eq("user_id", sessionUser.id).maybeSingle();
+    return ok({ settings: data?.settings ?? null });
+  }
+
+  // ── update-settings ────────────────────────────────────────────────────────
+  if (action === "update-settings") {
+    const { settings } = body;
+    if (!sessionUser || !settings) return fail("Missing fields", 400);
+    const safe = sanitizeSettings(settings);
+    const { error } = await supabase.from("user_settings").upsert({
+      user_id: sessionUser.id,
+      settings: safe,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id" });
+    if (error) return fail(error.message, 500);
+    return ok({ success: true });
+  }
+
   // ── get-sessions ─────────────────────────────────────────────────────────────
   if (action === "get-sessions") {
-    const { sessionToken } = body;
-    if (!sessionToken) return fail("Missing session", 401);
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const { data: sessions } = await supabase.from("sessions")
-      .select("id, created_at, expires_at")
-      .eq("user_id", session.user_id)
-      .order("created_at", { ascending: false });
-    return ok({ sessions: sessions ?? [] });
+    if (!sessionUser) return fail("Unauthorized", 401);
+    return ok({ sessions: [] });
   }
 
   // ── revoke-session ───────────────────────────────────────────────────────────
   if (action === "revoke-session") {
-    const { sessionToken, revokeId } = body;
-    if (!sessionToken || !revokeId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const { error } = await supabase.from("sessions")
-      .delete().eq("id", revokeId as string).eq("user_id", session.user_id);
-    if (error) return fail(error.message, 500);
+    if (!sessionUser) return fail("Unauthorized", 401);
     return ok({ success: true });
   }
 
   // ── get-upload-url (signed upload URL for avatar) ────────────────────────────
   if (action === "get-upload-url") {
-    const { sessionToken } = body;
-    if (!sessionToken) return fail("Missing session", 401);
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const filePath = `${session.user_id}.jpg`;
+    if (!sessionUser) return fail("Unauthorized", 401);
+    const filePath = `${sessionUser.id}.jpg`;
     const { data, error } = await supabase.storage.from("avatars").createSignedUploadUrl(filePath);
     if (error) return fail(error.message, 500);
     const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(filePath);
     return ok({ signedUrl: data.signedUrl, path: data.path, token: data.token, publicUrl: urlData.publicUrl });
   }
 
+  // ── get-group-upload-url (signed upload URL for group media) ───────────────
+  if (action === "get-group-upload-url") {
+    const { groupId, kind } = body as { groupId?: string; kind?: string };
+    if (!sessionUser || !groupId || !kind) return fail("Missing fields", 400);
+    if (!isGroupKind(kind)) return fail("Invalid kind");
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase.from("group_members")
+      .select("role").eq("group_id", groupId as string).eq("user_id", uid).maybeSingle();
+    if (!membership || membership.role !== "admin") return fail("Not authorized", 403);
+
+    const filePath = `${groupId}/${kind}.jpg`;
+    const { data, error } = await supabase.storage.from("groups").createSignedUploadUrl(filePath);
+    if (error) return fail(error.message, 500);
+    const { data: urlData } = supabase.storage.from("groups").getPublicUrl(filePath);
+    return ok({ signedUrl: data.signedUrl, path: data.path, token: data.token, publicUrl: urlData.publicUrl });
+  }
+
+  // ── update-group-media ─────────────────────────────────────────────────────
+  if (action === "update-group-media") {
+    const { groupId, avatarUrl, bannerUrl } = body as { groupId?: string; avatarUrl?: string; bannerUrl?: string };
+    if (!sessionUser || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase.from("group_members")
+      .select("role").eq("group_id", groupId as string).eq("user_id", uid).maybeSingle();
+    if (!membership || membership.role !== "admin") return fail("Not authorized", 403);
+
+    const update: Record<string, string> = {};
+    if (avatarUrl) update.avatar_url = avatarUrl;
+    if (bannerUrl) update.banner_url = bannerUrl;
+    if (Object.keys(update).length === 0) return fail("Missing media", 400);
+
+    const { data: updated, error } = await supabase.from("groups")
+      .update(update).eq("id", groupId as string).select("id, name, avatar_url, banner_url").single();
+    if (error) return fail(error.message, 500);
+    return ok({ group: updated });
+  }
+
   // ── store-public-key ─────────────────────────────────────────────────────────
   if (action === "store-public-key") {
-    const { sessionToken, publicKey } = body;
-    if (!sessionToken || !publicKey) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
+    const { publicKey } = body;
+    if (!sessionUser || !publicKey) return fail("Missing fields", 400);
+    if (!isValidPublicKey(String(publicKey))) return fail("Invalid public key", 400);
     const { error } = await supabase.from("user_public_keys").upsert({
-      user_id:    session.user_id,
+      user_id:    sessionUser.id,
       public_key: publicKey as string,
       updated_at: new Date().toISOString(),
     }, { onConflict: "user_id" });
@@ -492,10 +1124,8 @@ Deno.serve(async (req: Request) => {
 
   // ── get-public-key ────────────────────────────────────────────────────────────
   if (action === "get-public-key") {
-    const { sessionToken, userId } = body;
-    if (!sessionToken || !userId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
+    const { userId } = body;
+    if (!sessionUser || !userId) return fail("Missing fields", 400);
     const { data } = await supabase.from("user_public_keys")
       .select("public_key").eq("user_id", userId as string).maybeSingle();
     return ok({ publicKey: data?.public_key ?? null });
@@ -503,11 +1133,8 @@ Deno.serve(async (req: Request) => {
 
   // ── get-chats ─────────────────────────────────────────────────────────────────
   if (action === "get-chats") {
-    const { sessionToken } = body;
-    if (!sessionToken) return fail("Missing session", 401);
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    if (!sessionUser) return fail("Unauthorized", 401);
+    const uid = sessionUser.id;
 
     const { data: myMemberships } = await supabase
       .from("chat_members").select("chat_id, joined_at, last_read_at").eq("user_id", uid);
@@ -567,11 +1194,10 @@ Deno.serve(async (req: Request) => {
 
   // ── send-message ──────────────────────────────────────────────────────────────
   if (action === "send-message") {
-    const { sessionToken, chatId, encryptedBody, msgType = "text", fileName, fileSize, mimeType } = body;
-    if (!sessionToken || !chatId || !encryptedBody) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    const { chatId, encryptedBody, msgType = "text", fileName, fileSize, mimeType } = body;
+    if (!sessionUser || !chatId || !encryptedBody) return fail("Missing fields", 400);
+    if (!isEncryptedPayload(String(encryptedBody))) return fail("Invalid encrypted payload", 400);
+    const uid = sessionUser.id;
 
     const { data: membership } = await supabase.from("chat_members")
       .select("chat_id").eq("chat_id", chatId as string).eq("user_id", uid).maybeSingle();
@@ -589,22 +1215,806 @@ Deno.serve(async (req: Request) => {
     return ok({ message: msg });
   }
 
+  // ── send-group-message ─────────────────────────────────────────────────────────
+  if (action === "send-group-message") {
+    const { groupId, encryptedBody, msgType = "text", fileName, fileSize, mimeType } = body;
+    if (!sessionUser || !groupId || !encryptedBody) return fail("Missing fields", 400);
+    if (!isEncryptedPayload(String(encryptedBody))) return fail("Invalid encrypted payload", 400);
+    const uid = sessionUser.id;
+
+    const { data: groupState } = await supabase
+      .from("groups")
+      .select("id, is_archived")
+      .eq("id", groupId as string)
+      .maybeSingle();
+    if (!groupState || groupState.is_archived) return fail("Group not found", 404);
+
+    const { data: membership } = await supabase.from("group_members")
+      .select("group_id, user_id").eq("group_id", groupId as string).eq("user_id", uid).maybeSingle();
+    if (!membership) return fail(`User ${uid} is not a member of group ${groupId}`, 403);
+
+    const { data: msg, error } = await supabase.from("messages").insert({
+      sender_id: uid,
+      encrypted_body: encryptedBody,
+      msg_type: msgType,
+      group_id: groupId,
+      file_name: fileName ?? null,
+      file_size: fileSize ?? null,
+      mime_type: mimeType ?? null,
+      status: "sent",
+    }).select().single();
+    if (error) return fail(error.message, 500);
+
+    await supabase.from("groups").update({ last_activity: msg.created_at }).eq("id", groupId as string);
+    return ok({ message: msg });
+  }
+
+  // ── get-groups-overview ──────────────────────────────────────────────────
+  if (action === "get-groups-overview") {
+    if (!sessionUser) return fail("Unauthorized", 401);
+    const uid = sessionUser.id;
+
+    const { data: memberships, error: memberError } = await supabase
+      .from("group_members")
+      .select("group_id, role")
+      .eq("user_id", uid);
+    if (memberError) return fail(memberError.message, 500);
+
+    const groupIds = (memberships ?? []).map((m: any) => m.group_id as string).filter(Boolean);
+    if (groupIds.length === 0) return ok({ groups: [] });
+
+    const { data: groups, error: groupsError } = await supabase
+      .from("groups")
+      .select("id, name, description, avatar_url, last_activity, pinned_at")
+      .in("id", groupIds)
+      .eq("is_archived", false);
+    if (groupsError) return fail(groupsError.message, 500);
+
+    const activeGroupIds = (groups ?? []).map((g: any) => g.id as string).filter(Boolean);
+    if (activeGroupIds.length === 0) return ok({ groups: [] });
+
+    const { data: messages } = await supabase
+      .from("messages")
+      .select("id, group_id, sender_id, encrypted_body, created_at")
+      .in("group_id", activeGroupIds)
+      .order("created_at", { ascending: false });
+
+    const lastByGroup: Record<string, any> = {};
+    (messages ?? []).forEach((m: any) => {
+      if (!m.group_id) return;
+      if (!lastByGroup[m.group_id]) lastByGroup[m.group_id] = m;
+    });
+
+    const senderIds = [...new Set(Object.values(lastByGroup).map((m: any) => m.sender_id as string).filter(Boolean))];
+    const { data: senders } = senderIds.length > 0
+      ? await supabase.from("users").select("id, username").in("id", senderIds)
+      : { data: [] };
+    const senderMap = new Map<string, string>();
+    (senders ?? []).forEach((u: any) => senderMap.set(u.id, u.username ?? "Unknown"));
+
+    const { data: allMembers } = await supabase
+      .from("group_members")
+      .select("group_id")
+      .in("group_id", activeGroupIds);
+    const memberCountMap: Record<string, number> = {};
+    (allMembers ?? []).forEach((m: any) => {
+      memberCountMap[m.group_id] = (memberCountMap[m.group_id] ?? 0) + 1;
+    });
+
+    const myRoleMap: Record<string, string> = {};
+    (memberships ?? []).forEach((m: any) => {
+      if (m?.group_id) myRoleMap[String(m.group_id)] = String(m?.role ?? "member");
+    });
+
+    const payload = (groups ?? []).map((g: any) => {
+      const lastMsg = lastByGroup[g.id] ?? null;
+      return {
+        id: g.id,
+        name: g.name,
+        description: g.description,
+        avatar_url: g.avatar_url,
+        last_activity: g.last_activity,
+        last_message: lastMsg
+          ? {
+              text: "Encrypted message",
+              created_at: lastMsg.created_at,
+              username: senderMap.get(lastMsg.sender_id) ?? "Unknown",
+            }
+          : null,
+        member_count: memberCountMap[g.id] ?? 0,
+        is_pinned: !!g.pinned_at,
+        user_role: myRoleMap[g.id] ?? "member",
+      };
+    }).sort((a: any, b: any) => {
+      if (a.is_pinned && !b.is_pinned) return -1;
+      if (!a.is_pinned && b.is_pinned) return 1;
+      if (a.last_activity && b.last_activity) {
+        return new Date(b.last_activity).getTime() - new Date(a.last_activity).getTime();
+      }
+      if (a.last_activity) return -1;
+      if (b.last_activity) return 1;
+      return 0;
+    });
+
+    return ok({ groups: payload });
+  }
+
+  // ── create-group ─────────────────────────────────────────────────────────
+  if (action === "create-group") {
+    const { name, description } = body as { name?: string; description?: string | null };
+    if (!sessionUser || !name) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const groupName = String(name).trim().slice(0, 50);
+    const groupDesc = typeof description === "string" ? description.trim().slice(0, 200) : "";
+    if (!groupName) return fail("Group name is required", 400);
+
+    const { data: group, error: groupError } = await supabase
+      .from("groups")
+      .insert([
+        {
+          name: groupName,
+          description: groupDesc || null,
+          created_by: uid,
+          last_activity: new Date().toISOString(),
+        },
+      ])
+      .select("id, name, description, avatar_url, last_activity, pinned_at")
+      .single();
+    if (groupError) return fail(groupError.message, 500);
+
+    const { error: memberError } = await supabase
+      .from("group_members")
+      .insert([{ group_id: group.id, user_id: uid, role: "admin" }]);
+    if (memberError) return fail(memberError.message, 500);
+
+    return ok({ success: true, group });
+  }
+
+  // ── get-group-detail ─────────────────────────────────────────────────────
+  if (action === "get-group-detail") {
+    const { groupId } = body as { groupId?: string };
+    if (!sessionUser || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: myMembership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!myMembership) return fail("Not a group member", 403);
+
+    const { data: group, error: groupError } = await supabase
+      .from("groups")
+      .select("*")
+      .eq("id", groupId)
+      .eq("is_archived", false)
+      .maybeSingle();
+    if (groupError) return fail(groupError.message, 500);
+    if (!group) return fail("Group not found", 404);
+
+    const { data: memberRows, error: memberError } = await supabase
+      .from("group_members")
+      .select("role, user_id")
+      .eq("group_id", groupId);
+    if (memberError) return fail(memberError.message, 500);
+
+    const memberIds = (memberRows ?? []).map((m: any) => m.user_id as string).filter(Boolean);
+    const { data: memberUsers } = memberIds.length > 0
+      ? await supabase.from("users").select("id, username, avatar_url").in("id", memberIds)
+      : { data: [] };
+    const memberUserMap = new Map<string, any>();
+    (memberUsers ?? []).forEach((u: any) => memberUserMap.set(u.id, u));
+
+    const members = (memberRows ?? []).map((m: any) => ({
+      role: m.role,
+      user: memberUserMap.get(m.user_id) ?? { id: m.user_id, username: "Unknown", avatar_url: null },
+    }));
+
+    const { data: friendRows } = await supabase
+      .from("friend_requests")
+      .select("sender_id, receiver_id, status")
+      .in("status", ["accepted", "friends"])
+      .or(`sender_id.eq.${uid},receiver_id.eq.${uid}`);
+
+    const friendIds = [...new Set((friendRows ?? []).map((f: any) =>
+      f.sender_id === uid ? f.receiver_id : f.sender_id,
+    ).filter(Boolean))];
+    const { data: friendUsers } = friendIds.length > 0
+      ? await supabase.from("users").select("id, username, avatar_url").in("id", friendIds)
+      : { data: [] };
+    const memberIdSet = new Set(memberIds);
+    const friends = (friendUsers ?? []).filter((u: any) => !memberIdSet.has(u.id));
+
+    return ok({
+      group,
+      members,
+      userRole: myMembership.role ?? "member",
+      friends,
+    });
+  }
+
+  // ── add-group-member ─────────────────────────────────────────────────────
+  if (action === "add-group-member") {
+    const { groupId, targetUserId } = body as { groupId?: string; targetUserId?: string };
+    if (!sessionUser || !groupId || !targetUserId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!membership || membership.role !== "admin") return fail("Not authorized", 403);
+
+    const { data: existing } = await supabase
+      .from("group_members")
+      .select("user_id")
+      .eq("group_id", groupId)
+      .eq("user_id", targetUserId)
+      .maybeSingle();
+    if (existing) return ok({ success: true, alreadyMember: true });
+
+    const { error } = await supabase
+      .from("group_members")
+      .insert([{ group_id: groupId, user_id: targetUserId, role: "member" }]);
+    if (error) return fail(error.message, 500);
+
+    return ok({ success: true, alreadyMember: false });
+  }
+
+  // ── remove-group-member ──────────────────────────────────────────────────
+  if (action === "remove-group-member") {
+    const { groupId, targetUserId } = body as { groupId?: string; targetUserId?: string };
+    if (!sessionUser || !groupId || !targetUserId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: actorMembership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!actorMembership) return fail("Not a group member", 403);
+    if (uid !== targetUserId && actorMembership.role !== "admin") return fail("Not authorized", 403);
+
+    const { data: targetMembership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", targetUserId)
+      .maybeSingle();
+    if (!targetMembership) return ok({ success: true });
+
+    if (targetMembership.role === "admin") {
+      const { count: adminCount } = await supabase
+        .from("group_members")
+        .select("user_id", { count: "exact", head: true })
+        .eq("group_id", groupId)
+        .eq("role", "admin");
+      if ((adminCount ?? 0) <= 1) return fail("Group must keep at least one admin", 400);
+    }
+
+    const { error } = await supabase
+      .from("group_members")
+      .delete()
+      .eq("group_id", groupId)
+      .eq("user_id", targetUserId);
+    if (error) return fail(error.message, 500);
+
+    return ok({ success: true });
+  }
+
+  // ── update-group-member-role ─────────────────────────────────────────────
+  if (action === "update-group-member-role") {
+    const { groupId, targetUserId, role } = body as {
+      groupId?: string;
+      targetUserId?: string;
+      role?: string;
+    };
+    if (!sessionUser || !groupId || !targetUserId || !role) return fail("Missing fields", 400);
+    if (role !== "admin" && role !== "member") return fail("Invalid role", 400);
+    const uid = sessionUser.id;
+
+    const { data: actorMembership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!actorMembership || actorMembership.role !== "admin") return fail("Not authorized", 403);
+
+    if (role === "member") {
+      const { data: targetMembership } = await supabase
+        .from("group_members")
+        .select("role")
+        .eq("group_id", groupId)
+        .eq("user_id", targetUserId)
+        .maybeSingle();
+      if (targetMembership?.role === "admin") {
+        const { count: adminCount } = await supabase
+          .from("group_members")
+          .select("user_id", { count: "exact", head: true })
+          .eq("group_id", groupId)
+          .eq("role", "admin");
+        if ((adminCount ?? 0) <= 1) return fail("Group must keep at least one admin", 400);
+      }
+    }
+
+    const { error } = await supabase
+      .from("group_members")
+      .update({ role })
+      .eq("group_id", groupId)
+      .eq("user_id", targetUserId);
+    if (error) return fail(error.message, 500);
+
+    return ok({ success: true });
+  }
+
+  // ── update-group-settings ────────────────────────────────────────────────
+  if (action === "update-group-settings") {
+    const { groupId, muteNotifications, isPublic } = body as {
+      groupId?: string;
+      muteNotifications?: boolean;
+      isPublic?: boolean;
+    };
+    if (!sessionUser || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!membership || membership.role !== "admin") return fail("Not authorized", 403);
+
+    const update: Record<string, unknown> = {};
+    if (typeof muteNotifications === "boolean") update.mute_notifications = muteNotifications;
+    if (typeof isPublic === "boolean") update.is_public = isPublic;
+    if (Object.keys(update).length === 0) return fail("Missing settings", 400);
+
+    const { data: updated, error } = await supabase
+      .from("groups")
+      .update(update)
+      .eq("id", groupId)
+      .eq("is_archived", false)
+      .select("*")
+      .single();
+    if (error) return fail(error.message, 500);
+
+    return ok({ success: true, group: updated });
+  }
+
+  // ── delete-group (soft archive) ─────────────────────────────────────────
+  if (action === "delete-group") {
+    const { groupId } = body as { groupId?: string };
+    if (!sessionUser || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!membership || membership.role !== "admin") return fail("Not authorized", 403);
+
+    const { data: updated, error } = await supabase
+      .from("groups")
+      .update({ is_archived: true, last_activity: new Date().toISOString() })
+      .eq("id", groupId)
+      .select("id")
+      .maybeSingle();
+    if (error) return fail(error.message, 500);
+    if (!updated) return fail("Group not found", 404);
+
+    return ok({ success: true, groupId, archived: true });
+  }
+
+  // ── destroy-group (hard delete) ─────────────────────────────────────────
+  if (action === "destroy-group" || action === "destrou-group") {
+    const { groupId } = body as { groupId?: string };
+    if (!sessionUser || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!membership || membership.role !== "admin") return fail("Not authorized", 403);
+
+    const { data: deleted, error } = await supabase
+      .from("groups")
+      .delete()
+      .eq("id", groupId)
+      .select("id")
+      .maybeSingle();
+    if (error) return fail(error.message, 500);
+    if (!deleted) return fail("Group not found", 404);
+
+    return ok({ success: true, groupId, destroyed: true });
+  }
+
+  // ── get-group-search-candidates ──────────────────────────────────────────
+  if (action === "get-group-search-candidates") {
+    const { groupId, query } = body as { groupId?: string; query?: string };
+    if (!sessionUser || !groupId || !query) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+    const q = String(query).trim();
+    if (q.length < 2) return ok({ users: [] });
+
+    const { data: membership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!membership) return fail("Not a group member", 403);
+
+    const { data: users } = await supabase
+      .from("users")
+      .select("id, username, avatar_url")
+      .ilike("username", `%${q}%`)
+      .limit(10);
+
+    const { data: members } = await supabase
+      .from("group_members")
+      .select("user_id")
+      .eq("group_id", groupId);
+    const memberIdSet = new Set((members ?? []).map((m: any) => m.user_id as string));
+
+    const { data: pendingReqs } = await supabase
+      .from("group_join_requests")
+      .select("user_id")
+      .eq("group_id", groupId)
+      .eq("status", "pending");
+    const pendingSet = new Set((pendingReqs ?? []).map((r: any) => r.user_id as string));
+
+    const filtered = (users ?? []).filter((u: any) =>
+      u.id !== uid && !memberIdSet.has(u.id) && !pendingSet.has(u.id),
+    );
+    return ok({ users: filtered });
+  }
+
+  // ── get-group-chat-context ───────────────────────────────────────────────
+  if (action === "get-group-chat-context") {
+    const { groupId } = body as { groupId?: string };
+    if (!sessionUser || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!membership) return fail("Not a group member", 403);
+
+    const { data: group, error: groupError } = await supabase
+      .from("groups")
+      .select("id, name, description, avatar_url")
+      .eq("id", groupId)
+      .eq("is_archived", false)
+      .maybeSingle();
+    if (groupError) return fail(groupError.message, 500);
+    if (!group) return fail("Group not found", 404);
+
+    const { data: memberRows } = await supabase
+      .from("group_members")
+      .select("role, user_id")
+      .eq("group_id", groupId)
+      .limit(3);
+    const memberIds = (memberRows ?? []).map((m: any) => m.user_id as string).filter(Boolean);
+    const { data: users } = memberIds.length > 0
+      ? await supabase.from("users").select("id, username, avatar_url").in("id", memberIds)
+      : { data: [] };
+    const userMap = new Map<string, any>();
+    (users ?? []).forEach((u: any) => userMap.set(u.id, u));
+
+    const members = (memberRows ?? []).map((m: any) => ({
+      role: m.role,
+      user: userMap.get(m.user_id) ?? { id: m.user_id, username: "Unknown", avatar_url: null },
+    }));
+
+    return ok({ group, members });
+  }
+
+  // ── get-group-key-state ──────────────────────────────────────────────────
+  if (action === "get-group-key-state") {
+    const { groupId } = body as { groupId?: string };
+    if (!sessionUser || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!membership) return fail("Not a group member", 403);
+
+    const { data: memberRows } = await supabase
+      .from("group_members")
+      .select("user_id")
+      .eq("group_id", groupId);
+    const memberIds = (memberRows ?? []).map((m: any) => m.user_id as string).filter(Boolean);
+
+    const { data: existingRows } = memberIds.length > 0
+      ? await supabase
+          .from("group_keys")
+          .select("user_id")
+          .eq("group_id", groupId)
+          .in("user_id", memberIds)
+      : { data: [] };
+
+    const { data: ownKey } = await supabase
+      .from("group_keys")
+      .select("encrypted_key, sender_id")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+
+    const senderId = ownKey?.sender_id ? String(ownKey.sender_id) : "";
+    const { data: senderKey } = senderId
+      ? await supabase
+          .from("user_public_keys")
+          .select("public_key")
+          .eq("user_id", senderId)
+          .maybeSingle()
+      : { data: null };
+
+    const { data: publicKeys } = memberIds.length > 0
+      ? await supabase
+          .from("user_public_keys")
+          .select("user_id, public_key")
+          .in("user_id", memberIds)
+      : { data: [] };
+
+    return ok({
+      role: membership.role ?? "member",
+      memberIds,
+      existingKeyUserIds: (existingRows ?? []).map((r: any) => r.user_id as string),
+      ownKey: ownKey ?? null,
+      senderPublicKey: senderKey?.public_key ?? null,
+      publicKeys: publicKeys ?? [],
+    });
+  }
+
+  // ── upsert-group-keys ────────────────────────────────────────────────────
+  if (action === "upsert-group-keys") {
+    const { groupId, rows } = body as {
+      groupId?: string;
+      rows?: Array<{ user_id?: string; sender_id?: string; encrypted_key?: string }>;
+    };
+    if (!sessionUser || !groupId || !Array.isArray(rows)) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase
+      .from("group_members")
+      .select("role")
+      .eq("group_id", groupId)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!membership || membership.role !== "admin") return fail("Not authorized", 403);
+    if (rows.length === 0) return ok({ success: true, upserted: 0 });
+
+    const { data: memberRows } = await supabase
+      .from("group_members")
+      .select("user_id")
+      .eq("group_id", groupId);
+    const memberSet = new Set((memberRows ?? []).map((m: any) => m.user_id as string));
+
+    const payload: Array<{ group_id: string; user_id: string; sender_id: string; encrypted_key: string }> = [];
+    for (const row of rows) {
+      const targetUserId = String(row?.user_id ?? "").trim();
+      const senderId = String(row?.sender_id ?? "").trim();
+      const encryptedKey = String(row?.encrypted_key ?? "").trim();
+      if (!targetUserId || !senderId || !encryptedKey) continue;
+      if (senderId !== uid) return fail("Invalid sender", 400);
+      if (!memberSet.has(targetUserId)) return fail("Target is not a group member", 400);
+      if (!isEncryptedPayload(encryptedKey)) return fail("Invalid encrypted payload", 400);
+      payload.push({
+        group_id: groupId,
+        user_id: targetUserId,
+        sender_id: senderId,
+        encrypted_key: encryptedKey,
+      });
+    }
+
+    if (payload.length === 0) return ok({ success: true, upserted: 0 });
+    const { error } = await supabase
+      .from("group_keys")
+      .upsert(payload, { onConflict: "group_id,user_id" });
+    if (error) return fail(error.message, 500);
+
+    return ok({ success: true, upserted: payload.length });
+  }
+
+  // ── get-group-messages ─────────────────────────────────────────────────────────
+  if (action === "get-group-messages") {
+    const { groupId, before, after } = body;
+    if (!sessionUser || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase.from("group_members")
+      .select("group_id, user_id").eq("group_id", groupId as string).eq("user_id", uid).maybeSingle();
+    
+    if (!membership) return fail(`User ${uid} is not a member of group ${groupId}`, 403);
+
+    const { data: groupState } = await supabase
+      .from("groups")
+      .select("id, is_archived")
+      .eq("id", groupId as string)
+      .maybeSingle();
+    if (!groupState || groupState.is_archived) return fail("Group not found", 404);
+
+    let q = supabase
+      .from("messages")
+      .select("id, sender_id, encrypted_body, msg_type, file_name, file_size, mime_type, status, created_at")
+      .eq("group_id", groupId as string)
+      .order("created_at", { ascending: true });
+
+    if (after) {
+      q = q.gt("created_at", after as string).limit(200);
+    } else {
+      q = q.limit(50);
+      if (before) q = q.gt("created_at", before as string);
+    }
+
+    const { data: messages, error } = await q;
+    if (error) return fail(error.message, 500);
+
+    const senderIds = [...new Set((messages ?? []).map((m: any) => m.sender_id as string).filter(Boolean))];
+    const { data: senders } = senderIds.length > 0
+      ? await supabase.from("users").select("id, username, avatar_url").in("id", senderIds)
+      : { data: [] };
+    const senderMap = new Map<string, { id: string; username: string; avatar_url: string | null }>();
+    (senders ?? []).forEach((u: any) => {
+      senderMap.set(u.id, {
+        id: u.id,
+        username: u.username ?? "Unknown",
+        avatar_url: u.avatar_url ?? null,
+      });
+    });
+
+    const payload = (messages ?? []).map((m: any) => ({
+      ...m,
+      sender: senderMap.get(m.sender_id) ?? {
+        id: m.sender_id,
+        username: "Unknown",
+        avatar_url: null,
+      },
+    }));
+
+    return ok({ messages: payload });
+  }
+
+  // ── get-group-invite ─────────────────────────────────────────────────────────
+  if (action === "get-group-invite") {
+    const { groupId } = body;
+    if (!sessionUser || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase.from("group_members")
+      .select("role").eq("group_id", groupId as string).eq("user_id", uid).maybeSingle();
+    if (!membership || membership.role !== "admin") return fail("Not authorized", 403);
+
+    const { data: group } = await supabase.from("groups")
+      .select("id, is_archived")
+      .eq("id", groupId as string)
+      .maybeSingle();
+    if (!group || group.is_archived) return fail("Group not found", 404);
+
+    const { data: invite } = await supabase.from("group_invite_links")
+      .select("*")
+      .eq("group_id", groupId as string)
+      .eq("created_by", uid)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    return ok({ invite: invite ?? null });
+  }
+
+  // ── create-group-invite ─────────────────────────────────────────────────────
+  if (action === "create-group-invite") {
+    const { groupId } = body;
+    if (!sessionUser || !groupId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { data: membership } = await supabase.from("group_members")
+      .select("role").eq("group_id", groupId as string).eq("user_id", uid).maybeSingle();
+    if (!membership || membership.role !== "admin") return fail("Not authorized", 403);
+
+    const { data: group } = await supabase.from("groups")
+      .select("id, is_archived")
+      .eq("id", groupId as string)
+      .maybeSingle();
+    if (!group || group.is_archived) return fail("Group not found", 404);
+
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    let lastError: any = null;
+    for (let i = 0; i < 3; i++) {
+      const code = inviteCode();
+      const { data, error } = await supabase.from("group_invite_links").insert({
+        group_id: groupId,
+        created_by: uid,
+        code,
+        expires_at: expiresAt,
+      }).select().single();
+      if (!error) return ok({ invite: data });
+      lastError = error;
+    }
+    return fail(lastError?.message ?? "Could not create invite", 500);
+  }
+
+  // ── join-group-invite ───────────────────────────────────────────────────────
+  if (action === "join-group-invite") {
+    const { code } = body;
+    if (!sessionUser || !code) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const normalized = String(code).trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!normalized) return fail("Invalid code");
+
+    const { data: invite } = await supabase.from("group_invite_links")
+      .select("*")
+      .eq("code", normalized)
+      .maybeSingle();
+    if (!invite) return fail("Invalid code", 404);
+
+    if (invite.expires_at && new Date(invite.expires_at) < new Date()) return fail("Expired", 400);
+    if (invite.max_uses && invite.uses_count >= invite.max_uses) return fail("Limit reached", 400);
+
+    const { data: group } = await supabase
+      .from("groups")
+      .select("id, name, is_archived")
+      .eq("id", invite.group_id)
+      .maybeSingle();
+    if (!group || group.is_archived) return fail("Group is no longer available", 404);
+
+    const { data: existing } = await supabase.from("group_members")
+      .select("id").eq("group_id", invite.group_id).eq("user_id", uid).maybeSingle();
+    if (existing) return ok({ groupId: invite.group_id, alreadyMember: true });
+
+    const { error: memberError } = await supabase.from("group_members").insert({
+      group_id: invite.group_id,
+      user_id: uid,
+      role: "member",
+    });
+    if (memberError) return fail(memberError.message, 500);
+
+    await supabase.from("group_invite_links")
+      .update({ uses_count: (invite.uses_count ?? 0) + 1 })
+      .eq("id", invite.id);
+
+    return ok({ groupId: invite.group_id, groupName: group?.name ?? null, alreadyMember: false });
+  }
+
   // ── get-messages ──────────────────────────────────────────────────────────────
   if (action === "get-messages") {
-    const { sessionToken, chatId, before } = body;
-    if (!sessionToken || !chatId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    const { chatId, before, after } = body;
+    if (!sessionUser || !chatId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
 
     const { data: membership } = await supabase.from("chat_members")
       .select("chat_id").eq("chat_id", chatId as string).eq("user_id", uid).maybeSingle();
     if (!membership) return fail("Not a member of this chat", 403);
 
-    let q = supabase.from("messages")
+    let q = supabase
+      .from("messages")
       .select("id, chat_id, sender_id, encrypted_body, msg_type, file_name, file_size, mime_type, status, created_at")
-      .eq("chat_id", chatId as string).order("created_at", { ascending: false }).limit(50);
-    if (before) q = q.lt("created_at", before as string);
+      .eq("chat_id", chatId as string)
+      .order("created_at", { ascending: false });
+    if (after) q = q.gt("created_at", after as string).limit(100);
+    else {
+      q = q.limit(50);
+      if (before) q = q.lt("created_at", before as string);
+    }
     const { data: messages, error } = await q;
     if (error) return fail(error.message, 500);
 
@@ -618,11 +2028,9 @@ Deno.serve(async (req: Request) => {
 
   // ── mark-read ─────────────────────────────────────────────────────────────────
   if (action === "mark-read") {
-    const { sessionToken, chatId } = body;
-    if (!sessionToken || !chatId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    const { chatId } = body;
+    if (!sessionUser || !chatId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
     await supabase.from("chat_members")
       .update({ last_read_at: new Date().toISOString() })
       .eq("chat_id", chatId as string).eq("user_id", uid);
@@ -635,11 +2043,9 @@ Deno.serve(async (req: Request) => {
   // Find-or-create a 1-on-1 chat between two friends.
   // Safe to call even if one side deleted their membership.
   if (action === "open-chat") {
-    const { sessionToken, peerId } = body;
-    if (!sessionToken || !peerId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    const { peerId } = body;
+    if (!sessionUser || !peerId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
     if (uid === peerId) return fail("Cannot open chat with yourself");
 
     // Verify they are actually friends
@@ -674,11 +2080,9 @@ Deno.serve(async (req: Request) => {
 
   // ── delete-message ────────────────────────────────────────────────────────────
   if (action === "delete-message") {
-    const { sessionToken, messageId, forEveryone } = body;
-    if (!sessionToken || !messageId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    const { messageId, forEveryone } = body;
+    if (!sessionUser || !messageId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
 
     if (forEveryone) {
       // Verify the requester is the sender
@@ -694,11 +2098,9 @@ Deno.serve(async (req: Request) => {
 
   // ── delete-chat ───────────────────────────────────────────────────────────────
   if (action === "delete-chat") {
-    const { sessionToken, chatId } = body;
-    if (!sessionToken || !chatId) return fail("Missing fields");
-    const { data: session } = await supabase.from("sessions").select("user_id").eq("token_hash", sessionToken as string).maybeSingle();
-    if (!session) return fail("Invalid session", 401);
-    const uid = session.user_id;
+    const { chatId } = body;
+    if (!sessionUser || !chatId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
 
     // Confirm membership before touching anything
     const { data: membership } = await supabase.from("chat_members")

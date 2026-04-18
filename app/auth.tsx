@@ -5,6 +5,7 @@ import {
     ActivityIndicator,
     Animated,
     Easing,
+    KeyboardAvoidingView,
     Platform,
     Pressable,
     ScrollView,
@@ -36,8 +37,8 @@ const USERNAME_BLACKLIST = new Set([
   'delete', 'api', 'test', 'bot', 'spam', 'anonymous', 'everyone', 'here',
 ]);
 function validateUsername(u: string): { ok: boolean; reason?: string } {
-  if (u.length < 4)  return { ok: false, reason: 'Too short \u2014 min 4 characters' };
-  if (u.length > 20) return { ok: false, reason: 'Too long \u2014 max 20 characters' };
+  if (u.length < 4)  return { ok: false, reason: 'Too short — min 4 characters' };
+  if (u.length > 20) return { ok: false, reason: 'Too long — max 20 characters' };
   if (!USERNAME_RE.test(u)) return { ok: false, reason: 'Letters, numbers and _ only' };
   if (USERNAME_BLACKLIST.has(u)) return { ok: false, reason: 'That username is reserved' };
   return { ok: true };
@@ -51,12 +52,12 @@ function ActionRow({
     <View style={styles.actionRow}>
       {selected.length > 0 && (
         <Pressable onPress={onRemoveLast} style={styles.chipBtn}>
-          <Text style={styles.chipText}>{'\u232b'}  Remove last</Text>
+          <Text style={styles.chipText}>{'⌫'}  Remove last</Text>
         </Pressable>
       )}
       {selected.length === total && (
         <Pressable onPress={onClearAll} style={[styles.chipBtn, styles.chipDanger]}>
-          <Text style={[styles.chipText, styles.chipTextDanger]}>{'\u2715'}  Clear all</Text>
+          <Text style={[styles.chipText, styles.chipTextDanger]}>{'✕'}  Clear all</Text>
         </Pressable>
       )}
     </View>
@@ -250,166 +251,172 @@ export default function AuthScreen() {
       <View style={styles.blobTopRight} />
       <View style={styles.blobBottomLeft} />
 
-      <Animated.View style={[styles.screen, { opacity: screenOpacity, transform: [{ translateY: screenSlide }] }]}>
-        <ScrollView
-          contentContainerStyle={[styles.scrollContent, { paddingHorizontal: scrollHPad }]}
-          showsVerticalScrollIndicator={false}
-          keyboardShouldPersistTaps="handled"
+      <Animated.View style={[styles.screen, { opacity: screenOpacity, transform: [{ translateY: screenSlide }] }]}> 
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={0}
         >
-          <Animated.View style={[styles.branding, { transform: [{ scale: brandScale }] }]}>
-            <View style={[styles.lockCard, { backgroundColor: th.cardBg, width: lockSize, height: lockSize, borderRadius: lockSize / 2 }]}>
-              <Text style={[styles.lockIcon, { fontSize: lockIconFS }]}>🔒</Text>
-            </View>
-            <Text style={[styles.appName, { color: th.textDark, fontSize: appNameFS }]}>Privy</Text>
-            <Text style={[styles.tagline, { color: th.textMed, fontSize: taglineFS }]}>Private by Design.</Text>
-            <Text style={[styles.micro,   { color: th.textSoft }]}>No phone. No email. No tracking.</Text>
-          </Animated.View>
-
-          {isNewFlow && <StepDots current={newFlowIndex} />}
-
-          <Animated.View style={[
-            styles.card,
-            { backgroundColor: th.cardBg, borderColor: th.isDark ? th.border : 'rgba(255,255,255,0.9)', maxWidth: cardMaxWidth },
-            hasError && styles.cardError,
-            { opacity: cardOpacity, transform: [{ translateX: shakeX }] },
-          ]}>
-
-            {step === 'new-username' && (<>
-              <Text style={[styles.cardTitle, { color: th.textDark }]}>{isLoggingIn ? 'Log in to Privy' : 'Choose a Username'}</Text>
-              <Text style={[styles.cardDesc,  { color: th.textMed  }]}>
-                {isLoggingIn 
-                  ? 'Enter your existing username to continue.'
-                  : '4\u201320 characters \u00b7 letters, numbers, underscores\nThis is how friends find you on Privy.'}
-              </Text>
-              <View style={styles.inputWrapper}>
-                <Text style={[styles.inputLabel, { color: th.textSoft }]}>Username</Text>
-                <TextInput
-                  style={[
-                    styles.textInput,
-                    { backgroundColor: th.inputBg, color: th.textDark, borderColor: th.border },
-                    usernameStatus === 'ok'      && styles.textInputGood,
-                    usernameStatus === 'invalid' && styles.textInputBad,
-                  ]}
-                  placeholder="e.g. captain_vijay"
-                  placeholderTextColor={th.textSoft}
-                  value={username}
-                  onChangeText={v => {
-                    const cleaned = v.toLowerCase().replace(/[^a-z0-9_]/g, '');
-                    setUsername(cleaned);
-                    setUsernameStatus('idle');
-                    if (cleaned.length >= 4) {
-                      const r = validateUsername(cleaned);
-                      if (!r.ok) { setUsernameStatus('invalid'); setUsernameReason(r.reason ?? 'Invalid'); }
-                      else { setUsernameStatus('ok'); }
-                    }
-                  }}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  maxLength={20}
-                  returnKeyType="next"
-                  onSubmitEditing={handleUsernameNext}
-                />
-                <View style={styles.usernameStatusRow}>
-                  {usernameStatus === 'ok'      && <Text style={styles.statusOk}>{'\u2713'}  Looks good!</Text>}
-                  {usernameStatus === 'invalid' && <Text style={styles.statusBad}>{'\u2717'}  {usernameReason}</Text>}
-                </View>
+          <ScrollView
+            contentContainerStyle={[styles.scrollContent, { paddingHorizontal: scrollHPad }]}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
+            <Animated.View style={[styles.branding, { transform: [{ scale: brandScale }] }]}>
+              <View style={[styles.lockCard, { backgroundColor: th.cardBg, width: lockSize, height: lockSize, borderRadius: lockSize / 2 }]}>
+                <Text style={[styles.lockIcon, { fontSize: lockIconFS }]}>🔒</Text>
               </View>
-              <View style={[styles.rulesBadge, { backgroundColor: th.inputBg }]}>
-                <Text style={[styles.rulesText, { color: th.textSoft }]}>{isLoggingIn ? 'Enter your existing Privy username' : 'No phone number, no email required'}</Text>
-              </View>
-              {serverError && <ErrorBadge message={serverError} />}
-            </>)}
+              <Text style={[styles.appName, { color: th.textDark, fontSize: appNameFS }]}>Privy</Text>
+              <Text style={[styles.tagline, { color: th.textMed, fontSize: taglineFS }]}>Private by Design.</Text>
+              <Text style={[styles.micro,   { color: th.textSoft }]}>No phone. No email. No tracking.</Text>
+            </Animated.View>
 
-            {step === 'new-pin' && (<>
-              <Text style={[styles.cardTitle, { color: th.textDark }]}>{isLoggingIn ? 'Enter Your Emoji Key' : 'Create Your Emoji Key'}</Text>
-              <Text style={[styles.cardDesc,  { color: th.textMed  }]}>
-                {isLoggingIn 
-                  ? 'Enter the 6-emoji password for your account.'
-                  : 'Pick 6 emojis in order.\nThis is your password \u2014 remember it!'}
-              </Text>
-              <EmojiSlots selected={selectedEmojis} total={MAX_EMOJIS} />
-              <EmojiGrid onEmojiPress={handleEmojiPress} />
-              <ActionRow
-                selected={selectedEmojis} total={MAX_EMOJIS}
-                onRemoveLast={handleRemoveLast}
-                onClearAll={() => setSelectedEmojis([])}
-              />
-              {serverError && <ErrorBadge message={serverError} />}
-            </>)}
+            {isNewFlow && <StepDots current={newFlowIndex} />}
 
-            {step === 'return-pin' && (<>
-              <Text style={[styles.cardTitle, { color: th.textDark }]}>
-                {deviceUsername ? `Welcome back, ${deviceUsername}! 👋` : 'Welcome back! 👋'}
-              </Text>
-              <Text style={[styles.cardDesc, { color: th.textMed }]}>Enter your 6-emoji key to unlock Privy.</Text>
-              <EmojiSlots selected={selectedEmojis} total={MAX_EMOJIS} />
-              <EmojiGrid onEmojiPress={handleEmojiPress} />
-              <ActionRow
-                selected={selectedEmojis} total={MAX_EMOJIS}
-                onRemoveLast={handleRemoveLast}
-                onClearAll={() => setSelectedEmojis([])}
-              />
-              {serverError && <ErrorBadge message={serverError} />}
-            </>)}
+            <Animated.View style={[
+              styles.card,
+              { backgroundColor: th.cardBg, borderColor: th.isDark ? th.border : 'rgba(255,255,255,0.9)', maxWidth: cardMaxWidth },
+              hasError && styles.cardError,
+              { opacity: cardOpacity, transform: [{ translateX: shakeX }] },
+            ]}>
 
-          </Animated.View>
-
-          {(step === 'new-pin' || step === 'return-pin') && (
-            <View style={styles.microcopyBlock}>
-              <Text style={[styles.microcopyLine, { color: th.textSoft }]}>{'\ud83d\udd10'}  Your key stays on your device.</Text>
-              <Text style={[styles.microcopyLine, { color: th.textSoft }]}>{'\u2728'}  Only you control your identity.</Text>
-            </View>
-          )}
-
-        </ScrollView>
-        <View style={[styles.stickyFooter, { backgroundColor: th.bg + 'F2', paddingHorizontal: scrollHPad }]}>
-          <View style={cardMaxWidth ? { maxWidth: cardMaxWidth, width: '100%', alignSelf: 'center' } : {}}>
-          <View style={styles.ctaContainer}>
-            {isLoading ? (
-              <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" color={th.accent} />
-                <Text style={[styles.loadingText, { color: th.textMed }]}>
-                  {step === 'new-pin' && isLoggingIn
-                    ? 'Logging you in\u2026'
-                    : step === 'new-pin'
-                    ? 'Creating your identity\u2026'
-                    : step === 'return-pin'
-                    ? 'Verifying your key\u2026'
-                    : 'Please wait\u2026'}
+              {step === 'new-username' && (<>
+                <Text style={[styles.cardTitle, { color: th.textDark }]}>{isLoggingIn ? 'Log in to Privy' : 'Choose a Username'}</Text>
+                <Text style={[styles.cardDesc,  { color: th.textMed  }]}>
+                  {isLoggingIn 
+                    ? 'Enter your existing username to continue.'
+                    : '4–20 characters · letters, numbers, underscores\nThis is how friends find you on Privy.'}
                 </Text>
+                <View style={styles.inputWrapper}>
+                  <Text style={[styles.inputLabel, { color: th.textSoft }]}>Username</Text>
+                  <TextInput
+                    style={[
+                      styles.textInput,
+                      { backgroundColor: th.inputBg, color: th.textDark, borderColor: th.border },
+                      usernameStatus === 'ok'      && styles.textInputGood,
+                      usernameStatus === 'invalid' && styles.textInputBad,
+                    ]}
+                    placeholder="e.g. captain_vijay"
+                    placeholderTextColor={th.textSoft}
+                    value={username}
+                    onChangeText={v => {
+                      const cleaned = v.toLowerCase().replace(/[^a-z0-9_]/g, '');
+                      setUsername(cleaned);
+                      setUsernameStatus('idle');
+                      if (cleaned.length >= 4) {
+                        const r = validateUsername(cleaned);
+                        if (!r.ok) { setUsernameStatus('invalid'); setUsernameReason(r.reason ?? 'Invalid'); }
+                        else { setUsernameStatus('ok'); }
+                      }
+                    }}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    maxLength={20}
+                    returnKeyType="next"
+                    onSubmitEditing={handleUsernameNext}
+                  />
+                  <View style={styles.usernameStatusRow}>
+                    {usernameStatus === 'ok'      && <Text style={styles.statusOk}>{'✓'}  Looks good!</Text>}
+                    {usernameStatus === 'invalid' && <Text style={styles.statusBad}>{'✗'}  {usernameReason}</Text>}
+                  </View>
+                </View>
+                <View style={[styles.rulesBadge, { backgroundColor: th.inputBg }]}>
+                  <Text style={[styles.rulesText, { color: th.textSoft }]}>{isLoggingIn ? 'Enter your existing Privy username' : 'No phone number, no email required'}</Text>
+                </View>
+                {serverError && <ErrorBadge message={serverError} />}
+              </>)}
+
+              {step === 'new-pin' && (<>
+                <Text style={[styles.cardTitle, { color: th.textDark }]}>{isLoggingIn ? 'Enter Your Emoji Key' : 'Create Your Emoji Key'}</Text>
+                <Text style={[styles.cardDesc,  { color: th.textMed  }]}>
+                  {isLoggingIn 
+                    ? 'Enter the 6-emoji password for your account.'
+                    : 'Pick 6 emojis in order.\nThis is your password — remember it!'}
+                </Text>
+                <EmojiSlots selected={selectedEmojis} total={MAX_EMOJIS} />
+                <EmojiGrid onEmojiPress={handleEmojiPress} />
+                <ActionRow
+                  selected={selectedEmojis} total={MAX_EMOJIS}
+                  onRemoveLast={handleRemoveLast}
+                  onClearAll={() => setSelectedEmojis([])}
+                />
+                {serverError && <ErrorBadge message={serverError} />}
+              </>)}
+
+              {step === 'return-pin' && (<>
+                <Text style={[styles.cardTitle, { color: th.textDark }]}>
+                  {deviceUsername ? `Welcome back, ${deviceUsername}! 👋` : 'Welcome back! 👋'}
+                </Text>
+                <Text style={[styles.cardDesc, { color: th.textMed }]}>Enter your 6-emoji key to unlock Privy.</Text>
+                <EmojiSlots selected={selectedEmojis} total={MAX_EMOJIS} />
+                <EmojiGrid onEmojiPress={handleEmojiPress} />
+                <ActionRow
+                  selected={selectedEmojis} total={MAX_EMOJIS}
+                  onRemoveLast={handleRemoveLast}
+                  onClearAll={() => setSelectedEmojis([])}
+                />
+                {serverError && <ErrorBadge message={serverError} />}
+              </>)}
+
+            </Animated.View>
+
+            {(step === 'new-pin' || step === 'return-pin') && (
+              <View style={styles.microcopyBlock}>
+                <Text style={[styles.microcopyLine, { color: th.textSoft }]}>{'🔐'}  Your key stays on your device.</Text>
+                <Text style={[styles.microcopyLine, { color: th.textSoft }]}>{'✨'}  Only you control your identity.</Text>
               </View>
-            ) : (<>
-              {step === 'new-username' && (
-                <PrimaryButton label={'Next \u2192'} onPress={handleUsernameNext} disabled={username.trim().length < 4} />
-              )}
-              {step === 'new-pin' && (
-                <PrimaryButton label={isLoggingIn ? "Log In" : "Create My Identity"} onPress={handleIdentityAction} disabled={selectedEmojis.length < MAX_EMOJIS} />
-              )}
-              {step === 'return-pin' && (
-                <PrimaryButton label="Unlock Privy" onPress={handleLogin} disabled={selectedEmojis.length < MAX_EMOJIS} />
-              )}
-            </>)}
-          </View>{/* ctaContainer */}
+            )}
 
-          {step === 'new-pin' && (
-            <Pressable onPress={() => goToStep('new-username')} style={styles.secondaryBtn}>
-              <Text style={[styles.secondaryText, { color: th.textSoft }]}>{'←'} Change username</Text>
-            </Pressable>
-          )}
+          </ScrollView>
+          <View style={[styles.stickyFooter, { backgroundColor: th.bg + 'F2', paddingHorizontal: scrollHPad }]}>
+            <View style={cardMaxWidth ? { maxWidth: cardMaxWidth, width: '100%', alignSelf: 'center' } : {}}>
+            <View style={styles.ctaContainer}>
+              {isLoading ? (
+                <View style={styles.loadingContainer}>
+                  <ActivityIndicator size="large" color={th.accent} />
+                  <Text style={[styles.loadingText, { color: th.textMed }]}>
+                    {step === 'new-pin' && isLoggingIn
+                      ? 'Logging you in…'
+                      : step === 'new-pin'
+                      ? 'Creating your identity…'
+                      : step === 'return-pin'
+                      ? 'Verifying your key…'
+                      : 'Please wait…'}
+                  </Text>
+                </View>
+              ) : (<>
+                {step === 'new-username' && (
+                  <PrimaryButton label={'Next →'} onPress={handleUsernameNext} disabled={username.trim().length < 4} />
+                )}
+                {step === 'new-pin' && (
+                  <PrimaryButton label={isLoggingIn ? "Log In" : "Create My Identity"} onPress={handleIdentityAction} disabled={selectedEmojis.length < MAX_EMOJIS} />
+                )}
+                {step === 'return-pin' && (
+                  <PrimaryButton label="Unlock Privy" onPress={handleLogin} disabled={selectedEmojis.length < MAX_EMOJIS} />
+                )}
+              </>)}
+            </View>{/* ctaContainer */}
 
-          {step === 'new-username' && !isLoading && (
-            <Pressable onPress={() => {
-              setIsLoggingIn(!isLoggingIn);
-              setUsernameStatus('idle');
-              setUsernameReason('');
-            }} style={styles.secondaryBtn}>
-              <Text style={[styles.secondaryText, { color: th.textSoft }]}>
-                {isLoggingIn ? 'Need an account? Create one →' : 'Already have an account? Log in →'}
-              </Text>
-            </Pressable>
-          )}
-          </View>{/* tablet wrapper */}
-        </View>
+            {step === 'new-pin' && (
+              <Pressable onPress={() => goToStep('new-username')} style={styles.secondaryBtn}>
+                <Text style={[styles.secondaryText, { color: th.textSoft }]}>{'←'} Change username</Text>
+              </Pressable>
+            )}
+
+            {step === 'new-username' && !isLoading && (
+              <Pressable onPress={() => {
+                setIsLoggingIn(!isLoggingIn);
+                setUsernameStatus('idle');
+                setUsernameReason('');
+              }} style={styles.secondaryBtn}>
+                <Text style={[styles.secondaryText, { color: th.textSoft }]}>
+                  {isLoggingIn ? 'Need an account? Create one →' : 'Already have an account? Log in →'}
+                </Text>
+              </Pressable>
+            )}
+            </View>{/* tablet wrapper */}
+          </View>
+        </KeyboardAvoidingView>
       </Animated.View>
     </SafeAreaView>
   );

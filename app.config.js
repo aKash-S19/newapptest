@@ -1,16 +1,26 @@
 // app.config.js — reads from .env and injects values via expo-constants `extra`
 const appJson = require('./app.json');
 
+const supabaseUrl =
+  process.env.SUPABASE_URL ||
+  process.env.NEXT_PUBLIC_SUPABASE_URL ||
+  process.env.EXPO_PUBLIC_SUPABASE_URL;
+
+const supabaseAnonKey =
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error('Missing Supabase env: set SUPABASE_URL and SUPABASE_ANON_KEY (or NEXT_PUBLIC_/EXPO_PUBLIC_ equivalents).');
+}
+
 module.exports = {
   expo: {
     ...appJson.expo,
     extra: {
-      supabaseUrl:
-        process.env.SUPABASE_URL ||
-        'https://roqqrtbohtqadmkhgffr.supabase.co',
-      supabaseAnonKey:
-        process.env.SUPABASE_ANON_KEY ||
-        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJvcXFydGJvaHRxYWRta2hnZmZyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE0Mjk1OTQsImV4cCI6MjA4NzAwNTU5NH0.ZQgXA6cp1m3HMp9ENsEmuF_HsKYgCWb-nfM6FyoD-Pc',
+      supabaseUrl,
+      supabaseAnonKey,
     },
   },
 };

@@ -1,5 +1,5 @@
-import Constants from 'expo-constants';
 import { createClient } from '@supabase/supabase-js';
+import Constants from 'expo-constants';
 
 // ─── Config (injected via app.config.js → expo-constants) ────────────────────
 const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
@@ -10,9 +10,16 @@ const FUNCTIONS_URL = `${SUPABASE_URL}/functions/v1`;
 
 // ─── Supabase JS client (for realtime, etc.) ───────────────────────────
 export const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON, {
-  auth: { persistSession: false },
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+    detectSessionInUrl: false,
+  },
   realtime: { params: { eventsPerSecond: 10 } },
 });
+
+// Alias for backwards compatibility
+export const supabase = supabaseClient;
 
 // ─── Generic caller ───────────────────────────────────────────────────────────
 /**
@@ -20,6 +27,8 @@ export const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON, {
  * Accepts any action payload — type safety lives in AuthContext.
  */
 export async function callAuthFunction(payload: Record<string, unknown>): Promise<any> {
+  const { data } = await supabaseClient.auth.getSession();
+  const accessToken = data.session?.access_token ?? '';
   let response: Response;
   try {
     response = await fetch(`${FUNCTIONS_URL}/auth`, {
@@ -27,7 +36,7 @@ export async function callAuthFunction(payload: Record<string, unknown>): Promis
       headers: {
         'Content-Type':  'application/json',
         'apikey':        SUPABASE_ANON,
-        'Authorization': `Bearer ${SUPABASE_ANON}`,
+        'Authorization': accessToken ? `Bearer ${accessToken}` : `Bearer ${SUPABASE_ANON}`,
       },
       body: JSON.stringify(payload),
     });

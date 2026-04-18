@@ -2,14 +2,13 @@ import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import Slider from '@react-native-community/slider';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
-import { Image } from 'expo-image';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { router } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import {
-    ActivityIndicator, Alert, Modal, Platform, Pressable,
+    ActivityIndicator, Alert, Image, Modal, Platform, Pressable,
     ScrollView, Share, StyleSheet, Switch, Text,
     TextInput,
     View
@@ -31,11 +30,11 @@ const TEXT_SOFT = '#8FA3B1';
 const ERROR     = '#FF5F6D';
 
 // Dark mode colors
-const DK_BG        = '#111827';
-const DK_CARD_BG   = '#1F2937';
-const DK_TEXT_DARK = '#F9FAFB';
-const DK_TEXT_SOFT = '#9CA3AF';
-const DK_DIVIDER   = 'rgba(255,255,255,0.07)';
+const DK_BG        = '#0B0D10';
+const DK_CARD_BG   = '#14171C';
+const DK_TEXT_DARK = '#F4F6F8';
+const DK_TEXT_SOFT = '#8892A0';
+const DK_DIVIDER   = 'rgba(255,255,255,0.06)';
 
 const FONT_SIZES: Record<string, number> = { sm: 13, md: 15, lg: 17, xl: 19 };
 
@@ -66,13 +65,32 @@ export default function ProfileScreen() {
 
   // Dynamic style objects (depend on settings)
   const dynSafe    = { flex: 1, backgroundColor: bg } as const;
-  const dynContent = { paddingHorizontal: 18, paddingTop: 16, paddingBottom: 40, gap: 10 } as const;
-  const dynCard    = { backgroundColor: cardBg, borderRadius: 18, overflow: 'hidden' as const, borderWidth: 1, borderColor: dk ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)' };
-  const dynRow     = { flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'space-between' as const, paddingHorizontal: 16, paddingVertical: 14 };
+  const dynContent = { paddingHorizontal: 18, paddingTop: 12, paddingBottom: 44, gap: 16 } as const;
+  const cardShadow = dk ? {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+  } : {
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.04)',
+    ...Platform.select({
+      web: { boxShadow: '0px 10px 30px rgba(15,23,42,0.08)' } as any,
+      default: { shadowColor: '#0F172A', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.12, shadowRadius: 18, elevation: 3 },
+    }),
+  };
+  const dynCard    = { backgroundColor: cardBg, borderRadius: 20, overflow: 'hidden' as const, ...cardShadow };
+  const dynRow     = { flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'space-between' as const, paddingHorizontal: 16, paddingVertical: 13, minHeight: 52 };
   const dynRowLabel   = { fontSize: FS, fontFamily: 'Inter_500Medium' as const, color: textDark };
   const dynRowValue   = { fontSize: FS - 2, color: textSoft };
   const dynDivider    = { height: 1, backgroundColor: dividerC, marginLeft: 54 };
-  const dynSectionTitle = { fontSize: 12, fontFamily: 'Inter_700Bold' as const, color: textSoft, textTransform: 'uppercase' as const, letterSpacing: 1.2, marginLeft: 6, marginBottom: 4, marginTop: 10 };
+  const dynSectionTitle = { fontSize: 13, fontFamily: 'Inter_700Bold' as const, color: textSoft, textTransform: 'uppercase' as const, letterSpacing: 0.6, marginLeft: 2, marginBottom: 8, marginTop: 18 };
+
+  const modalOverlayBg = dk ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.45)';
+  const modalSheetBg = cardBg;
+  const modalInputBg = dk ? '#111418' : BG;
+  const modalInputBorder = dk ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.1)';
+  const modalOptionBg = dk ? '#1B1F26' : '#F4F6F8';
+  const modalDeviceBg = dk ? '#1B1F26' : BG;
+  const revokeBg = dk ? 'rgba(255,95,109,0.18)' : '#FEF0F1';
 
   // Local state for modals
   const [editUsernameVisible, setEditUsernameVisible]     = useState(false);
@@ -84,8 +102,10 @@ export default function ProfileScreen() {
   const [sessionsLoading, setSessionsLoading]             = useState(false);
   const [colorPickerVisible, setColorPickerVisible]       = useState(false);
   const [whoMsgVisible, setWhoMsgVisible]                 = useState(false);
+  const [whoGroupVisible, setWhoGroupVisible]             = useState(false);
   const [disappearVisible, setDisappearVisible]           = useState(false);
   const [avatarLoading, setAvatarLoading]                 = useState(false);
+  const [notifSoundVisible, setNotifSoundVisible]         = useState(false);
 
   const joinDate = user ? new Date(user.created_at).toLocaleDateString('en-US', {
     month: 'long', day: 'numeric', year: 'numeric',
@@ -260,29 +280,28 @@ export default function ProfileScreen() {
       <View style={[{ flex: 1, width: '100%' }, isTablet && { maxWidth: 720, alignSelf: 'center' as const }]}>
       <ScrollView contentContainerStyle={dynContent} showsVerticalScrollIndicator={false}>
 
-        {/* ── Avatar + name ── */}
-        <Pressable style={[styles.idCard, { backgroundColor: cardBg, borderColor: `${ACC}33` }]} onPress={handleChangePicture}>
-          <View style={styles.idAvatarWrap}>
+        {/* ── Profile hero ── */}
+        <View style={styles.profileHero}>
+          <Pressable style={[styles.heroAvatarWrap, { borderColor: `${ACC}55` }]} onPress={handleChangePicture}>
             {avatarLoading ? (
-              <View style={[styles.idAvatarImg, { alignItems: 'center', justifyContent: 'center' }]}>
+              <View style={[styles.heroAvatar, { alignItems: 'center', justifyContent: 'center' }]}>
                 <ActivityIndicator color={ACC} />
               </View>
             ) : avatarSource ? (
-              <Image source={avatarSource} style={styles.idAvatarImg} contentFit="cover" />
+              <Image source={avatarSource} style={styles.heroAvatar} resizeMode="cover" />
             ) : (
-              <View style={[styles.idAvatarImg, { alignItems: 'center', justifyContent: 'center', backgroundColor: `${ACC}25` }]}>
-                <MaterialCommunityIcons name="account" size={36} color={ACC} />
+              <View style={[styles.heroAvatar, { alignItems: 'center', justifyContent: 'center', backgroundColor: `${ACC}25` }]}>
+                <MaterialCommunityIcons name="account" size={42} color={ACC} />
               </View>
             )}
-            <View style={[styles.cameraTag, { backgroundColor: ACC }]}><MaterialCommunityIcons name="camera" size={12} color="#fff" /></View>
-          </View>
-          <View style={styles.idInfo}>
-            <Text style={[styles.idName, { color: textDark, fontSize: FS + 3 }]}>{user?.username ?? '—'}</Text>
-            <Text style={[styles.idSince, { color: textSoft }]}>Member since {joinDate}</Text>
-            <Text style={{ color: ACC, fontSize: 11, marginTop: 2 }}>Tap to change photo</Text>
-          </View>
-          <View style={[styles.idBadge, { backgroundColor: `${ACC}1A`, borderColor: `${ACC}33` }]}><MaterialCommunityIcons name="shield-check" size={22} color={ACC} /></View>
-        </Pressable>
+            <View style={[styles.heroCameraTag, { backgroundColor: ACC }]}>
+              <MaterialCommunityIcons name="camera" size={14} color="#fff" />
+            </View>
+          </Pressable>
+          <Text style={[styles.heroName, { color: textDark, fontSize: FS + 4 }]}>{user?.username ?? '—'}</Text>
+          <Text style={[styles.heroSub, { color: textSoft }]}>Member since {joinDate}</Text>
+          <Text style={[styles.heroHint, { color: ACC }]}>Tap photo to change</Text>
+        </View>
 
         {/* ─── 1. Profile ─────────────────────────────────────────────── */}
         <Text style={dynSectionTitle}>Profile</Text>
@@ -408,6 +427,11 @@ export default function ProfileScreen() {
             <View style={styles.rowRight}><Text style={dynRowValue}>{{everyone:'Everyone',friends:'Friends Only',nobody:'Nobody'}[settings.whoCanMessage]}</Text><Text style={styles.chevron}>›</Text></View>
           </Pressable>
           <View style={dynDivider} />
+          <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={() => setWhoGroupVisible(true)}>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="account-group-outline" size={20} color={textSoft} /><Text style={dynRowLabel}>Who Can Add Me To Groups</Text></View>
+            <View style={styles.rowRight}><Text style={dynRowValue}>{{anyone:'Anyone',friends_only:'Friends Only',no_one:'No One'}[settings.whoCanAddToGroup || 'anyone']}</Text><Text style={styles.chevron}>›</Text></View>
+          </Pressable>
+          <View style={dynDivider} />
           <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={() => Alert.alert('Blocked Users', 'No blocked users yet.')}>
             <View style={styles.rowLeft}><MaterialCommunityIcons name="cancel" size={20} color={textSoft} /><Text style={dynRowLabel}>Blocked Users</Text></View>
             <Text style={styles.chevron}>›</Text>
@@ -442,6 +466,11 @@ export default function ProfileScreen() {
               {i < arr.length - 1 && <View style={dynDivider} />}
             </React.Fragment>
           ))}
+          <View style={dynDivider} />
+          <Pressable style={({ pressed }) => [dynRow, pressed && { opacity: 0.75 }]} onPress={() => setNotifSoundVisible(true)}>
+            <View style={styles.rowLeft}><MaterialCommunityIcons name="volume-high" size={20} color={textSoft} /><Text style={dynRowLabel}>Notification Sound</Text></View>
+            <View style={styles.rowRight}><Text style={dynRowValue}>{settings.notificationSound === 'silent' ? 'Silent' : 'Default'}</Text><Text style={styles.chevron}>›</Text></View>
+          </Pressable>
         </View>
 
         {/* ─── 6. Account ─────────────────────────────────────────────── */}
@@ -462,12 +491,13 @@ export default function ProfileScreen() {
 
       {/* ── Edit Username Modal ── */}
       <Modal visible={editUsernameVisible} transparent animationType="slide" onRequestClose={() => setEditUsernameVisible(false)}>
-        <Pressable style={styles.modalOverlay} onPress={() => setEditUsernameVisible(false)}>
-          <Pressable style={styles.modalSheet} onPress={() => {}}>
-            <Text style={styles.modalTitle}>Edit Username</Text>
-            <Text style={styles.modalSub}>3–20 characters. Letters, numbers, underscores.</Text>
+        <Pressable style={[styles.modalOverlay, { backgroundColor: modalOverlayBg }]} onPress={() => setEditUsernameVisible(false)}>
+          <Pressable style={[styles.modalSheet, { backgroundColor: modalSheetBg }]} onPress={() => {}}>
+            <Text style={[styles.modalTitle, { color: textDark }]}>Edit Username</Text>
+            <Text style={[styles.modalSub, { color: textSoft }]}>3–20 characters. Letters, numbers, underscores.</Text>
+            <Text style={[styles.modalSub, { color: textSoft }]}>You can change your username twice per month.</Text>
             <TextInput
-              style={styles.modalInput}
+              style={[styles.modalInput, { backgroundColor: modalInputBg, borderColor: modalInputBorder, color: textDark }]}
               value={newUsername}
               onChangeText={setNewUsername}
               autoCapitalize="none"
@@ -483,15 +513,31 @@ export default function ProfileScreen() {
         </Pressable>
       </Modal>
 
+      {/* ── Notification Sound Modal ── */}
+      <Modal visible={notifSoundVisible} transparent animationType="slide" onRequestClose={() => setNotifSoundVisible(false)}>
+        <Pressable style={[styles.modalOverlay, { backgroundColor: modalOverlayBg }]} onPress={() => setNotifSoundVisible(false)}>
+          <Pressable style={[styles.modalSheet, { backgroundColor: modalSheetBg }]} onPress={() => {}}>
+            <Text style={[styles.modalTitle, { color: textDark }]}>Notification Sound</Text>
+            {([['default','Default system sound'],['silent','Silent']] as const).map(([val, label]) => (
+              <Pressable key={val} style={[styles.optionRow, { backgroundColor: modalOptionBg }, settings.notificationSound === val && { backgroundColor: `${ACC}1A`, borderWidth: 1, borderColor: `${ACC}4D` }]}
+                onPress={() => { update('notificationSound', val); Haptics.selectionAsync(); setNotifSoundVisible(false); }}>
+                <Text style={[styles.optionText, { color: textDark }, settings.notificationSound === val && { color: ACC, fontFamily: 'Inter_700Bold' }]}>{label}</Text>
+                {settings.notificationSound === val && <MaterialCommunityIcons name="check" size={18} color={ACC} />}
+              </Pressable>
+            ))}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* ── QR Code Modal ── */}
       <Modal visible={qrVisible} transparent animationType="fade" onRequestClose={() => setQrVisible(false)}>
-        <Pressable style={styles.modalOverlay} onPress={() => setQrVisible(false)}>
-          <Pressable style={[styles.modalSheet, { alignItems: 'center', gap: 20 }]} onPress={() => {}}>
-            <Text style={styles.modalTitle}>Your QR Code</Text>
+        <Pressable style={[styles.modalOverlay, { backgroundColor: modalOverlayBg }]} onPress={() => setQrVisible(false)}>
+          <Pressable style={[styles.modalSheet, { alignItems: 'center', gap: 20, backgroundColor: modalSheetBg }]} onPress={() => {}}>
+            <Text style={[styles.modalTitle, { color: textDark }]}>Your QR Code</Text>
             <View style={styles.qrWrap}>
               <QRCode value={`privy:${user?.username}`} size={220} color={TEXT_DARK} backgroundColor="white" />
             </View>
-            <Text style={styles.modalSub}>Friends can scan this to add you on Privy</Text>
+            <Text style={[styles.modalSub, { color: textSoft }]}>Friends can scan this to add you on Privy</Text>
             <Pressable style={styles.modalBtn} onPress={handleShareId}>
               <Text style={styles.modalBtnText}>Share ID Instead</Text>
             </Pressable>
@@ -501,12 +547,12 @@ export default function ProfileScreen() {
 
       {/* ── Color Picker Modal ── */}
       <Modal visible={colorPickerVisible} transparent animationType="slide" onRequestClose={() => setColorPickerVisible(false)}>
-        <Pressable style={styles.modalOverlay} onPress={() => setColorPickerVisible(false)}>
-          <Pressable style={styles.modalSheet} onPress={() => {}}>
-            <Text style={styles.modalTitle}>Theme Color</Text>
+        <Pressable style={[styles.modalOverlay, { backgroundColor: modalOverlayBg }]} onPress={() => setColorPickerVisible(false)}>
+          <Pressable style={[styles.modalSheet, { backgroundColor: modalSheetBg }]} onPress={() => {}}>
+            <Text style={[styles.modalTitle, { color: textDark }]}>Theme Color</Text>
             <View style={styles.colorRow}>
               {ACCENT_COLORS.map(c => (
-                <Pressable key={c} style={[styles.colorDot, { backgroundColor: c, borderColor: settings.accentColor === c ? TEXT_DARK : 'transparent', transform: [{ scale: settings.accentColor === c ? 1.15 : 1 }] }]}
+                <Pressable key={c} style={[styles.colorDot, { backgroundColor: c, borderColor: settings.accentColor === c ? textDark : 'transparent', transform: [{ scale: settings.accentColor === c ? 1.15 : 1 }] }]}
                   onPress={() => { update('accentColor', c); Haptics.selectionAsync(); setColorPickerVisible(false); }} />
               ))}
             </View>
@@ -516,14 +562,43 @@ export default function ProfileScreen() {
 
       {/* ── Who Can Message Modal ── */}
       <Modal visible={whoMsgVisible} transparent animationType="slide" onRequestClose={() => setWhoMsgVisible(false)}>
-        <Pressable style={styles.modalOverlay} onPress={() => setWhoMsgVisible(false)}>
-          <Pressable style={styles.modalSheet} onPress={() => {}}>
-            <Text style={styles.modalTitle}>Who Can Message Me</Text>
+        <Pressable style={[styles.modalOverlay, { backgroundColor: modalOverlayBg }]} onPress={() => setWhoMsgVisible(false)}>
+          <Pressable style={[styles.modalSheet, { backgroundColor: modalSheetBg }]} onPress={() => {}}>
+            <Text style={[styles.modalTitle, { color: textDark }]}>Who Can Message Me</Text>
             {([['everyone','Everyone'],['friends','Friends Only'],['nobody','Nobody']] as const).map(([val, label]) => (
-              <Pressable key={val} style={[styles.optionRow, settings.whoCanMessage === val && { backgroundColor: `${ACC}1A`, borderWidth: 1, borderColor: `${ACC}4D` }]}
+              <Pressable key={val} style={[styles.optionRow, { backgroundColor: modalOptionBg }, settings.whoCanMessage === val && { backgroundColor: `${ACC}1A`, borderWidth: 1, borderColor: `${ACC}4D` }]}
                 onPress={() => { update('whoCanMessage', val); Haptics.selectionAsync(); setWhoMsgVisible(false); }}>
-                <Text style={[styles.optionText, settings.whoCanMessage === val && { color: ACC, fontFamily: 'Inter_700Bold' }]}>{label}</Text>
+                <Text style={[styles.optionText, { color: textDark }, settings.whoCanMessage === val && { color: ACC, fontFamily: 'Inter_700Bold' }]}>{label}</Text>
                 {settings.whoCanMessage === val && <MaterialCommunityIcons name="check" size={18} color={ACC} />}
+              </Pressable>
+            ))}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* ── Who Can Add Me To Groups Modal ── */}
+      <Modal visible={whoGroupVisible} transparent animationType="slide" onRequestClose={() => setWhoGroupVisible(false)}>
+        <Pressable style={[styles.modalOverlay, { backgroundColor: modalOverlayBg }]} onPress={() => setWhoGroupVisible(false)}>
+          <Pressable style={[styles.modalSheet, { backgroundColor: modalSheetBg }]} onPress={() => {}}>
+            <Text style={[styles.modalTitle, { color: textDark }]}>Who Can Add Me To Groups</Text>
+            {([['anyone','Anyone','Any user can add me to groups'],['friends_only','Friends Only','Only friends can add me'],['no_one','No One','I can only join via invite link']] as const).map(([val, label, desc]) => (
+              <Pressable key={val} style={[styles.optionRow, { backgroundColor: modalOptionBg }, (settings.whoCanAddToGroup || 'anyone') === val && { backgroundColor: `${ACC}1A`, borderWidth: 1, borderColor: `${ACC}4D` }]}
+                onPress={async () => { 
+                  Haptics.selectionAsync(); 
+                  update('whoCanAddToGroup', val);
+                  // Also save to database
+                  await callAuthFunction({ 
+                    action: 'update-profile', 
+                    sessionToken, 
+                    data: { group_invite_preference: val } 
+                  });
+                  setWhoGroupVisible(false); 
+                }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.optionText, { color: textDark }, (settings.whoCanAddToGroup || 'anyone') === val && { color: ACC, fontFamily: 'Inter_700Bold' }]}>{label}</Text>
+                  <Text style={[styles.optionDesc, { color: textSoft }]}>{desc}</Text>
+                </View>
+                {(settings.whoCanAddToGroup || 'anyone') === val && <MaterialCommunityIcons name="check" size={18} color={ACC} />}
               </Pressable>
             ))}
           </Pressable>
@@ -532,13 +607,13 @@ export default function ProfileScreen() {
 
       {/* ── Disappearing Messages Modal ── */}
       <Modal visible={disappearVisible} transparent animationType="slide" onRequestClose={() => setDisappearVisible(false)}>
-        <Pressable style={styles.modalOverlay} onPress={() => setDisappearVisible(false)}>
-          <Pressable style={styles.modalSheet} onPress={() => {}}>
-            <Text style={styles.modalTitle}>Default Disappearing Messages</Text>
+        <Pressable style={[styles.modalOverlay, { backgroundColor: modalOverlayBg }]} onPress={() => setDisappearVisible(false)}>
+          <Pressable style={[styles.modalSheet, { backgroundColor: modalSheetBg }]} onPress={() => {}}>
+            <Text style={[styles.modalTitle, { color: textDark }]}>Default Disappearing Messages</Text>
             {([['off','Off'],['24h','24 Hours'],['7d','7 Days'],['30d','30 Days']] as const).map(([val, label]) => (
-              <Pressable key={val} style={[styles.optionRow, settings.disappearDefault === val && { backgroundColor: `${ACC}1A`, borderWidth: 1, borderColor: `${ACC}4D` }]}
+              <Pressable key={val} style={[styles.optionRow, { backgroundColor: modalOptionBg }, settings.disappearDefault === val && { backgroundColor: `${ACC}1A`, borderWidth: 1, borderColor: `${ACC}4D` }]}
                 onPress={() => { update('disappearDefault', val); Haptics.selectionAsync(); setDisappearVisible(false); }}>
-                <Text style={[styles.optionText, settings.disappearDefault === val && { color: ACC, fontFamily: 'Inter_700Bold' }]}>{label}</Text>
+                <Text style={[styles.optionText, { color: textDark }, settings.disappearDefault === val && { color: ACC, fontFamily: 'Inter_700Bold' }]}>{label}</Text>
                 {settings.disappearDefault === val && <MaterialCommunityIcons name="check" size={18} color={ACC} />}
               </Pressable>
             ))}
@@ -548,24 +623,24 @@ export default function ProfileScreen() {
 
       {/* ── Active Devices Modal ── */}
       <Modal visible={devicesVisible} transparent animationType="slide" onRequestClose={() => setDevicesVisible(false)}>
-        <Pressable style={styles.modalOverlay} onPress={() => setDevicesVisible(false)}>
-          <Pressable style={[styles.modalSheet, { maxHeight: '75%' }]} onPress={() => {}}>
-            <Text style={styles.modalTitle}>Active Devices</Text>
+        <Pressable style={[styles.modalOverlay, { backgroundColor: modalOverlayBg }]} onPress={() => setDevicesVisible(false)}>
+          <Pressable style={[styles.modalSheet, { maxHeight: '75%', backgroundColor: modalSheetBg }]} onPress={() => {}}>
+            <Text style={[styles.modalTitle, { color: textDark }]}>Active Devices</Text>
             {sessionsLoading ? (
               <ActivityIndicator color={ACC} style={{ marginVertical: 24 }} />
             ) : sessions.length === 0 ? (
-              <Text style={[styles.modalSub, { textAlign: 'center', padding: 20 }]}>No active sessions found.</Text>
+              <Text style={[styles.modalSub, { color: textSoft, textAlign: 'center', padding: 20 }]}>No active sessions found.</Text>
             ) : (
               <ScrollView style={{ width: '100%' }} contentContainerStyle={{ gap: 10, paddingTop: 4 }}>
                 {sessions.map((s, i) => (
-                  <View key={s.id} style={styles.deviceRow}>
-                    <MaterialCommunityIcons name="cellphone" size={22} color={TEXT_SOFT} />
+                  <View key={s.id} style={[styles.deviceRow, { backgroundColor: modalDeviceBg }]}>
+                    <MaterialCommunityIcons name="cellphone" size={22} color={textSoft} />
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.deviceLabel}>{i === 0 ? 'This device' : `Device ${i + 1}`}</Text>
-                      <Text style={styles.deviceSub}>Logged in {timeAgoFull(s.created_at)}</Text>
+                      <Text style={[styles.deviceLabel, { color: textDark }]}>{i === 0 ? 'This device' : `Device ${i + 1}`}</Text>
+                      <Text style={[styles.deviceSub, { color: textSoft }]}>Logged in {timeAgoFull(s.created_at)}</Text>
                     </View>
                     <Pressable
-                      style={[styles.revokeBtn, i === 0 && { opacity: 0.35 }]}
+                      style={[styles.revokeBtn, { backgroundColor: revokeBg }, i === 0 && { opacity: 0.35 }]}
                       onPress={() => revokeSession(s.id, i === 0)}
                     >
                       <Text style={styles.revokeBtnText}>{i === 0 ? 'Current' : 'Revoke'}</Text>
@@ -604,6 +679,14 @@ const styles = StyleSheet.create({
   idSince:       { fontSize: 12, color: TEXT_SOFT },
   idBadge:       { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(76,175,130,0.10)', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(76,175,130,0.2)' },
 
+  profileHero: { alignItems: 'center', gap: 8, paddingTop: 6, paddingBottom: 18 },
+  heroAvatarWrap: { borderWidth: 2, borderRadius: 52, padding: 4 },
+  heroAvatar: { width: 96, height: 96, borderRadius: 48, overflow: 'hidden' },
+  heroCameraTag: { position: 'absolute', bottom: 2, right: 2, borderRadius: 12, width: 24, height: 24, alignItems: 'center', justifyContent: 'center' },
+  heroName: { fontFamily: 'Inter_700Bold' },
+  heroSub: { fontSize: 13, fontFamily: 'Inter_400Regular' },
+  heroHint: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
+
   sectionTitle:  { fontSize: 12, fontFamily: 'Inter_700Bold', color: TEXT_SOFT, textTransform: 'uppercase', letterSpacing: 1.2, marginLeft: 6, marginBottom: 4, marginTop: 10 },
   card:          { backgroundColor: CARD_BG, borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(0,0,0,0.05)' },
   divider:       { height: 1, backgroundColor: 'rgba(0,0,0,0.04)', marginLeft: 54 },
@@ -635,6 +718,7 @@ const styles = StyleSheet.create({
   optionRowActive:{ borderWidth: 1 },
   optionText:    { fontSize: 15, fontFamily: 'Inter_500Medium', color: TEXT_DARK },
   optionTextActive:{ fontFamily: 'Inter_700Bold' },
+  optionDesc:    { fontSize: 12, marginTop: 2 },
 
   deviceRow:     { flexDirection: 'row', alignItems: 'center', backgroundColor: BG, borderRadius: 12, padding: 14, gap: 12 },
   deviceLabel:   { fontSize: 14, fontFamily: 'Inter_600SemiBold', color: TEXT_DARK },

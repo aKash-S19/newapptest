@@ -21,6 +21,7 @@ import * as SecureStore from 'expo-secure-store';
 
 const PRIVATE_KEY_STORE = 'privy_ecdh_private_key';
 const PUBLIC_KEY_STORE  = 'privy_ecdh_public_key';
+const GROUP_KEY_PREFIX  = 'privy_group_key_';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -152,5 +153,32 @@ export function uint8ArrayToBase64(bytes: Uint8Array): string {
 }
 
 export function base64ToUint8Array(b64: string): Uint8Array {
+  return base64ToUint8(b64);
+}
+
+// ─── Group key helpers ───────────────────────────────────────────────────────
+
+export function generateGroupKey(): Uint8Array {
+  return randomBytes(32);
+}
+
+export async function storeGroupKey(groupId: string, key: Uint8Array): Promise<void> {
+  const b64 = uint8ToBase64(key);
+  await SecureStore.setItemAsync(`${GROUP_KEY_PREFIX}${groupId}`, b64);
+}
+
+export async function getStoredGroupKey(groupId: string): Promise<Uint8Array | null> {
+  const b64 = await SecureStore.getItemAsync(`${GROUP_KEY_PREFIX}${groupId}`);
+  return b64 ? base64ToUint8(b64) : null;
+}
+
+export async function encryptGroupKeyForPeer(peerPublicKeyB64: string, groupKey: Uint8Array): Promise<string> {
+  const shared = await deriveSharedKey(peerPublicKeyB64);
+  return encryptMessage(shared, uint8ToBase64(groupKey));
+}
+
+export async function decryptGroupKeyFromPeer(peerPublicKeyB64: string, payload: string): Promise<Uint8Array> {
+  const shared = await deriveSharedKey(peerPublicKeyB64);
+  const b64 = await decryptMessage(shared, payload);
   return base64ToUint8(b64);
 }

@@ -31,17 +31,17 @@ export function useAppTheme(): AppTheme {
   const dk = settings.darkMode;
 
   return {
-    bg:       dk ? '#111827' : '#F4F6F8',
-    cardBg:   dk ? '#1F2937' : '#FFFFFF',
-    textDark: dk ? '#F9FAFB' : '#1A2332',
-    textMed:  dk ? '#9CA3AF' : '#5A7182',
-    textSoft: dk ? '#6B7280' : '#8FA3B1',
+    bg:       dk ? '#0B0D10' : '#F4F6F8',
+    cardBg:   dk ? '#14171C' : '#FFFFFF',
+    textDark: dk ? '#F4F6F8' : '#1A2332',
+    textMed:  dk ? '#B8C0CC' : '#5A7182',
+    textSoft: dk ? '#8892A0' : '#8FA3B1',
     accent:   settings.accentColor,
     error:    '#FF5F6D',
     border:   dk ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
-    divider:  dk ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.04)',
-    inputBg:  dk ? '#374151' : '#EDF0F4',
-    tabBg:    dk ? '#1F2937' : '#FFFFFF',
+    divider:  dk ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+    inputBg:  dk ? '#1B1F26' : '#EDF0F4',
+    tabBg:    dk ? '#14171C' : '#FFFFFF',
     isDark:   dk,
     fontSize: FONT_SIZES[settings.fontSize] ?? 15,
   };

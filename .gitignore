@@ -3,6 +3,7 @@ node_modules/
 
 # Expo
 .expo/
+.expo-shared/
 dist/
 web-build/
 expo-env.d.ts
@@ -13,7 +14,11 @@ expo-env.d.ts
 *.jks
 *.p8
 *.p12
+*.pfx
 *.key
+*.keystore
+*.crt
+*.cer
 *.mobileprovision
 
 # Metro
@@ -60,3 +65,17 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Python local environments
+.venv/
+venv/
+
+# Root-level local exports and temp artifacts
+/nul
+/_doc_extract.txt
+/Document*.docx
+/*.png
+/*.jpg
+/*.jpeg
+/*.webp
+/*.heic

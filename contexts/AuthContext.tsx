@@ -4,6 +4,7 @@ import React, {
     useCallback,
     useContext,
     useEffect,
+    useMemo,
     useState,
 } from 'react';
 
@@ -11,17 +12,14 @@ import { getOrCreateDeviceId } from '@/lib/deviceId';
 import { getOrCreatePublicKey } from '@/lib/e2ee';
 import { callAuthFunction } from '@/lib/supabase';
 
-// ─── Keys ────────────────────────────────────────────────────────────────────
-const SESSION_KEY = 'privy_session_token';
-const USER_KEY    = 'privy_user_info';
+const LAST_USERNAME_KEY = 'privy_last_username';
+const SESSION_TOKEN_KEY = 'privy_session_token';
 
-// ─── Types ───────────────────────────────────────────────────────────────────
 export interface UserInfo {
   id:              string;
   username:        string;
   created_at:      string;
   avatar_url?:     string | null;
-  // populated only in search results
   requestStatus?:  string;
   chatId?:         string | null;
   peerPublicKey?:  string | null;
@@ -51,10 +49,8 @@ export interface ChatRow {
 }
 
 interface AuthContextType {
-  /** 'boot' = splash/loading, 'unauthenticated', 'authenticated' */
   status:         'boot' | 'unauthenticated' | 'authenticated';
   user:           UserInfo | null;
-  /** Username already linked to this device (skip new-user flow) */
   deviceUsername: string | null;
   sessionToken:   string | null;
 
@@ -71,157 +67,137 @@ interface AuthContextType {
   sendFriendRequest: (toUserId: string) => Promise<void>;
   getChats:          () => Promise<ChatRow[]>;
   sendMessage:       (chatId: string, encryptedBody: string, msgType?: string, fileMeta?: { fileName?: string; fileSize?: number; mimeType?: string }) => Promise<Message>;
-  getMessages:       (chatId: string, before?: string) => Promise<Message[]>;
+  getMessages:       (chatId: string, before?: string, after?: string) => Promise<Message[]>;
   markRead:          (chatId: string) => Promise<void>;
   deleteMessage:     (messageId: string, forEveryone: boolean) => Promise<void>;
   deleteChat:        (chatId: string) => Promise<void>;
   openChat:          (peerId: string) => Promise<{ chatId: string; peerPublicKey: string | null }>;
   removeFriend:      (peerId: string) => Promise<void>;
+  sendGroupMessage:  (groupId: string, encryptedBody: string, msgType?: string, fileMeta?: { fileName?: string; fileSize?: number; mimeType?: string }) => Promise<Message>;
+  getGroupMessages:  (groupId: string, before?: string) => Promise<Message[]>;
 }
 
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
 
-// ─── Provider ────────────────────────────────────────────────────────────────
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [status,         setStatus]         = useState<'boot' | 'unauthenticated' | 'authenticated'>('boot');
-  const [user,           setUser]           = useState<UserInfo | null>(null);
-  const [deviceUsername, setDeviceUsername] = useState<string | null>(null);
-  const [sessionToken,   setSessionToken]   = useState<string | null>(null);
+async function getSessionUser(sessionToken: string): Promise<UserInfo | null> {
+  const res = await callAuthFunction({ action: 'get-session-user', sessionToken });
+  return (res.user ?? null) as UserInfo | null;
+}
 
-  // ── Boot: check stored session → fallback to device check ────────────────
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [status, setStatus] = useState<'boot' | 'unauthenticated' | 'authenticated'>('boot');
+  const [user, setUser] = useState<UserInfo | null>(null);
+  const [deviceUsername, setDeviceUsername] = useState<string | null>(null);
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
+
   useEffect(() => {
     let mounted = true;
+
     (async () => {
-      try {
-        // Fast path: restore session from secure storage
-        const storedToken = await SecureStore.getItemAsync(SESSION_KEY);
-        const storedUser  = await SecureStore.getItemAsync(USER_KEY);
-        if (storedToken && storedUser) {
-          const u = JSON.parse(storedUser) as UserInfo;
-          if (mounted) {
+      const storedUsername = await SecureStore.getItemAsync(LAST_USERNAME_KEY);
+      if (mounted) setDeviceUsername(storedUsername ?? null);
+
+      const storedToken = await SecureStore.getItemAsync(SESSION_TOKEN_KEY);
+      if (!mounted) return;
+      if (storedToken) {
+        try {
+          const profile = await getSessionUser(storedToken);
+          if (profile) {
             setSessionToken(storedToken);
-            setUser(u);
+            setUser(profile);
             setStatus('authenticated');
+            await SecureStore.setItemAsync(LAST_USERNAME_KEY, profile.username);
+            setDeviceUsername(profile.username);
+            return;
           }
-          // Re-upload ECDH public key on every boot — retry up to 5 times so
-          // transient network/crypto errors don't silently leave the key missing.
-          (async () => {
-            for (let i = 0; i < 5; i++) {
-              try {
-                const publicKey = await getOrCreatePublicKey();
-                await callAuthFunction({ action: 'store-public-key', sessionToken: storedToken, publicKey });
-                break; // success
-              } catch {
-                await new Promise(r => setTimeout(r, 2000 * (i + 1)));
-              }
-            }
-          })();
-          return; // skip device check — already logged in
-        }
-
-        // Check if this device already has a registered account
-        try {
-          const deviceId = await getOrCreateDeviceId();
-          const res = await callAuthFunction({ action: 'check-device', deviceId });
-          if (res.found && mounted) {
-            setDeviceUsername(res.user.username);
-          }
-        } catch {}
-
-      } catch {
-        // Network or storage error — proceed to normal auth flow
-      }
-      if (mounted) setStatus('unauthenticated');
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  // ── Persist helpers ───────────────────────────────────────────────────────
-  const saveSession = useCallback(async (token: string, userInfo: UserInfo) => {
-    await SecureStore.setItemAsync(SESSION_KEY, token);
-    await SecureStore.setItemAsync(USER_KEY,    JSON.stringify(userInfo));
-    setSessionToken(token);
-    setUser(userInfo);
-    setStatus('authenticated');
-    // Upload ECDH public key — retry up to 5 times
-    (async () => {
-      for (let i = 0; i < 5; i++) {
-        try {
-          const publicKey = await getOrCreatePublicKey();
-          await callAuthFunction({ action: 'store-public-key', sessionToken: token, publicKey });
-          break;
         } catch {
-          await new Promise(r => setTimeout(r, 2000 * (i + 1)));
+          // Ignore and fall through to unauthenticated.
         }
       }
+      setSessionToken(null);
+      setUser(null);
+      setStatus('unauthenticated');
     })();
-  }, []);
-  const register = useCallback(async (username: string, emoji: string[]) => {
-    const deviceId  = await getOrCreateDeviceId();
-    const publicKey = await getOrCreatePublicKey();   // generate key BEFORE the server call
-    const res = await callAuthFunction({
-      action: 'register', username, emojiKey: emoji, deviceId, publicKey,
-    });
-    await saveSession(res.sessionToken, res.user);
-  }, [saveSession]);
 
-  const login = useCallback(async (emoji: string[]) => {
-    const deviceId  = await getOrCreateDeviceId();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const storeSession = useCallback(async (nextUser: UserInfo, token: string) => {
+    await SecureStore.setItemAsync(SESSION_TOKEN_KEY, token);
+    await SecureStore.setItemAsync(LAST_USERNAME_KEY, nextUser.username);
+    setSessionToken(token);
+    setUser(nextUser);
+    setDeviceUsername(nextUser.username);
+    setStatus('authenticated');
+  }, []);
+
+  const clearSession = useCallback(async () => {
+    await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
+    setSessionToken(null);
+    setUser(null);
+    setStatus('unauthenticated');
+  }, []);
+
+  const register = useCallback(async (username: string, emoji: string[]) => {
+    const uname = username.trim().toLowerCase();
+    const deviceId = await getOrCreateDeviceId();
     const publicKey = await getOrCreatePublicKey();
     const res = await callAuthFunction({
-      action: 'login', emojiKey: emoji, deviceId, publicKey,
+      action: 'register',
+      username: uname,
+      emojiKey: emoji,
+      deviceId,
+      publicKey,
     });
-    await saveSession(res.sessionToken, res.user);
-  }, [saveSession]);
+    if (!res?.user || !res?.sessionToken) throw new Error('Account creation failed');
+    await storeSession(res.user as UserInfo, res.sessionToken as string);
+  }, [storeSession]);
 
   const loginWithUsername = useCallback(async (username: string, emoji: string[]) => {
-    const deviceId  = await getOrCreateDeviceId();
+    const uname = username.trim().toLowerCase();
+    const deviceId = await getOrCreateDeviceId();
     const publicKey = await getOrCreatePublicKey();
     const res = await callAuthFunction({
-      action: 'login-username', username, emojiKey: emoji, deviceId, publicKey,
+      action: 'login-username',
+      username: uname,
+      emojiKey: emoji,
+      deviceId,
+      publicKey,
     });
-    await saveSession(res.sessionToken, res.user);
-  }, [saveSession]);
+    if (!res?.user || !res?.sessionToken) throw new Error('Invalid username or emoji key');
+    await storeSession(res.user as UserInfo, res.sessionToken as string);
+  }, [storeSession]);
+
+  const login = useCallback(async (emoji: string[]) => {
+    if (!deviceUsername) throw new Error('Missing username');
+    await loginWithUsername(deviceUsername, emoji);
+  }, [deviceUsername, loginWithUsername]);
 
   const recoverInit = useCallback(async (username: string) => {
     return callAuthFunction({ action: 'recover-init', username });
   }, []);
 
-  const recoverVerify = useCallback(async (
-    username: string, answer: string, newEmoji: string[],
-  ) => {
-    const publicKey = await getOrCreatePublicKey();
-    const res = await callAuthFunction({
-      action: 'recover-verify', username, answer, newEmojiKey: newEmoji, publicKey,
-    });
-    await saveSession(res.sessionToken, res.user);
-  }, [saveSession]);
+  const recoverVerify = useCallback(async (username: string, answer: string, newEmoji: string[]) => {
+    const res = await callAuthFunction({ action: 'recover-verify', username, answer, newEmojiKey: newEmoji });
+    if (res?.username) {
+      await SecureStore.setItemAsync(LAST_USERNAME_KEY, res.username);
+      setDeviceUsername(res.username);
+    }
+  }, []);
 
   const signOut = useCallback(async () => {
-    if (sessionToken) {
-      try { await callAuthFunction({ action: 'signout', sessionToken }); } catch {}
-    }
-    await SecureStore.deleteItemAsync(SESSION_KEY);
-    await SecureStore.deleteItemAsync(USER_KEY);
-    setUser(null);
-    setSessionToken(null);
-    setDeviceUsername(null);
-    setStatus('unauthenticated');
-  }, [sessionToken]);
+    await callAuthFunction({ action: 'signout', sessionToken });
+    await clearSession();
+  }, [sessionToken, clearSession]);
 
   const deleteAccount = useCallback(async (emoji: string[]) => {
-    if (!sessionToken) throw new Error('Not authenticated');
-    await callAuthFunction({ action: 'delete-account', sessionToken, emojiKey: emoji });
-    await SecureStore.deleteItemAsync(SESSION_KEY);
-    await SecureStore.deleteItemAsync(USER_KEY);
-    setUser(null);
-    setSessionToken(null);
-    setDeviceUsername(null);
-    setStatus('unauthenticated');
-  }, [sessionToken]);
+    await callAuthFunction({ action: 'delete-account', emojiKey: emoji, sessionToken });
+    await clearSession();
+  }, [sessionToken, clearSession]);
 
   const findUser = useCallback(async (query: string): Promise<UserInfo[]> => {
-    if (!sessionToken) return [];
     const res = await callAuthFunction({ action: 'find-user', query, sessionToken });
     return res.users ?? [];
   }, [sessionToken]);
@@ -232,16 +208,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const updateUser = useCallback((u: UserInfo) => {
     setUser(u);
-    SecureStore.setItemAsync(USER_KEY, JSON.stringify(u)).catch(() => {});
   }, []);
 
   const sendFriendRequest = useCallback(async (toUserId: string) => {
-    if (!sessionToken) throw new Error('Not authenticated');
-    await callAuthFunction({ action: 'send-request', sessionToken, toUserId });
+    await callAuthFunction({ action: 'send-request', toUserId, sessionToken });
   }, [sessionToken]);
 
   const getChats = useCallback(async (): Promise<ChatRow[]> => {
-    if (!sessionToken) return [];
     const res = await callAuthFunction({ action: 'get-chats', sessionToken });
     return res.chats ?? [];
   }, [sessionToken]);
@@ -252,61 +225,78 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     msgType = 'text',
     fileMeta?: { fileName?: string; fileSize?: number; mimeType?: string },
   ): Promise<Message> => {
-    if (!sessionToken) throw new Error('Not authenticated');
     const res = await callAuthFunction({
-      action: 'send-message', sessionToken, chatId,
-      encryptedBody, msgType, ...fileMeta,
+      action: 'send-message', chatId, encryptedBody, msgType, ...fileMeta, sessionToken,
     });
     return res.message as Message;
   }, [sessionToken]);
 
-  const getMessages = useCallback(async (chatId: string, before?: string): Promise<Message[]> => {
-    if (!sessionToken) return [];
-    const res = await callAuthFunction({ action: 'get-messages', sessionToken, chatId, before });
+  const sendGroupMessage = useCallback(async (
+    groupId: string,
+    encryptedBody: string,
+    msgType = 'text',
+    fileMeta?: { fileName?: string; fileSize?: number; mimeType?: string },
+  ): Promise<Message> => {
+    const res = await callAuthFunction({
+      action: 'send-group-message', groupId, encryptedBody, msgType, ...fileMeta, sessionToken,
+    });
+    return res.message as Message;
+  }, [sessionToken]);
+
+  const getGroupMessages = useCallback(async (groupId: string, before?: string): Promise<Message[]> => {
+    const res = await callAuthFunction({ action: 'get-group-messages', groupId, before, after: before, sessionToken });
+    return (res.messages ?? []) as Message[];
+  }, [sessionToken]);
+
+  const getMessages = useCallback(async (chatId: string, before?: string, after?: string): Promise<Message[]> => {
+    const res = await callAuthFunction({ action: 'get-messages', chatId, before, after, sessionToken });
     return (res.messages ?? []) as Message[];
   }, [sessionToken]);
 
   const markRead = useCallback(async (chatId: string): Promise<void> => {
-    if (!sessionToken) return;
-    await callAuthFunction({ action: 'mark-read', sessionToken, chatId });
+    await callAuthFunction({ action: 'mark-read', chatId, sessionToken });
   }, [sessionToken]);
 
   const deleteMessage = useCallback(async (messageId: string, forEveryone: boolean): Promise<void> => {
-    if (!sessionToken) throw new Error('Not authenticated');
-    await callAuthFunction({ action: 'delete-message', sessionToken, messageId, forEveryone });
+    await callAuthFunction({ action: 'delete-message', messageId, forEveryone, sessionToken });
   }, [sessionToken]);
 
   const deleteChat = useCallback(async (chatId: string): Promise<void> => {
-    if (!sessionToken) throw new Error('Not authenticated');
-    await callAuthFunction({ action: 'delete-chat', sessionToken, chatId });
+    await callAuthFunction({ action: 'delete-chat', chatId, sessionToken });
   }, [sessionToken]);
 
   const openChat = useCallback(async (peerId: string): Promise<{ chatId: string; peerPublicKey: string | null }> => {
-    if (!sessionToken) throw new Error('Not authenticated');
-    const res = await callAuthFunction({ action: 'open-chat', sessionToken, peerId });
+    const res = await callAuthFunction({ action: 'open-chat', peerId, sessionToken });
     return { chatId: res.chatId as string, peerPublicKey: (res.peerPublicKey as string | null) ?? null };
   }, [sessionToken]);
 
   const removeFriend = useCallback(async (peerId: string): Promise<void> => {
-    if (!sessionToken) throw new Error('Not authenticated');
-    await callAuthFunction({ action: 'remove-friend', sessionToken, peerId });
+    await callAuthFunction({ action: 'remove-friend', peerId, sessionToken });
   }, [sessionToken]);
 
+  const value = useMemo(() => ({
+    status, user, deviceUsername, sessionToken,
+    register, login, loginWithUsername, recoverInit, recoverVerify,
+    signOut, deleteAccount, findUser, checkUsername, updateUser,
+    sendFriendRequest, getChats,
+    sendMessage, getMessages, markRead, deleteMessage, deleteChat, openChat, removeFriend,
+    sendGroupMessage, getGroupMessages,
+  }), [
+    status, user, deviceUsername, sessionToken,
+    register, login, loginWithUsername, recoverInit, recoverVerify,
+    signOut, deleteAccount, findUser, checkUsername, updateUser,
+    sendFriendRequest, getChats,
+    sendMessage, getMessages, markRead, deleteMessage, deleteChat, openChat, removeFriend,
+    sendGroupMessage, getGroupMessages,
+  ]);
+
   return (
-    <AuthContext.Provider value={{
-      status, user, deviceUsername, sessionToken,
-      register, login, loginWithUsername, recoverInit, recoverVerify,
-      signOut, deleteAccount, findUser, checkUsername, updateUser,
-      sendFriendRequest, getChats,
-      sendMessage, getMessages, markRead, deleteMessage, deleteChat, openChat, removeFriend,
-    }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );
 }
 
-// ─── Hook ─────────────────────────────────────────────────────────────────────
 export function useAuth() {
   return useContext(AuthContext);
 }
-

@@ -3,37 +3,76 @@
  * Local push notifications for incoming messages.
  *
  * expo-notifications remote push was removed from Expo Go in SDK 53.
- * We load the module lazily via require() inside a try-catch so the app
- * keeps working in Expo Go (notifications are simply no-ops there).
+ * We mock the entire module in Expo Go to prevent any errors.
  * In a development build or production build everything works normally.
  */
 import { Platform } from 'react-native';
 
-// Lazy-load expo-notifications so a throw at module level doesn't crash the app.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let N: any = null;
-try {
-  N = require('expo-notifications');
-  // Configure foreground presentation once the module is available
-  N.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldPlaySound: true,
-      shouldSetBadge:  true,
-      shouldShowBanner: true,
-      shouldShowList: true,
-    }),
-  });
-} catch {
-  // Running in Expo Go with SDK 53+ — notifications unavailable, silently skip
+let isExpoGoChecked = false;
+let isExpoGoEnv = false;
+
+function checkIsExpoGo(): boolean {
+  if (isExpoGoChecked) return isExpoGoEnv;
+  try {
+    const Constants = require('expo-constants');
+    isExpoGoEnv = Constants?.default?.executionEnvironment === 'storeClient';
+  } catch {
+    isExpoGoEnv = false;
+  }
+  isExpoGoChecked = true;
+  return isExpoGoEnv;
+}
+
+let mockNotifications: any = null;
+
+function createMockNotifications() {
+  return {
+    setNotificationHandler: () => {},
+    getPermissionsAsync: async () => ({ status: 'denied' }),
+    requestPermissionsAsync: async () => ({ status: 'denied' }),
+    scheduleNotificationAsync: async () => '',
+    addNotificationReceivedListener: () => ({ remove: () => {} }),
+    addNotificationsDidReceiveNotificationListener: () => ({ remove: () => {} }),
+    addNotificationResponseReceivedListener: () => ({ remove: () => {} }),
+    dismissAllNotificationsAsync: async () => {},
+    dismissNotificationAsync: async () => {},
+    getPresentedNotificationsAsync: async () => [],
+  };
+}
+
+function getMockNotifications() {
+  if (!mockNotifications) {
+    mockNotifications = createMockNotifications();
+  }
+  return mockNotifications;
+}
+
+let actualNotifications: any = null;
+
+async function getNotifications(): Promise<any> {
+  if (actualNotifications) return actualNotifications;
+  if (Platform.OS === 'web') return null;
+
+  if (checkIsExpoGo()) {
+    return getMockNotifications();
+  }
+
+  try {
+    const mod: any = await import('expo-notifications');
+    actualNotifications = mod.default ?? mod;
+    return actualNotifications;
+  } catch {
+    return getMockNotifications();
+  }
 }
 
 export async function requestNotificationPermission(): Promise<boolean> {
-  if (!N || Platform.OS === 'web') return false;
+  if (Platform.OS === 'web') return false;
+  const mod = await getNotifications();
   try {
-    const { status: existing } = await N.getPermissionsAsync();
+    const { status: existing } = await mod.getPermissionsAsync();
     if (existing === 'granted') return true;
-    const { status } = await N.requestPermissionsAsync();
+    const { status } = await mod.requestPermissionsAsync();
     return status === 'granted';
   } catch {
     return false;
@@ -48,39 +87,44 @@ export async function showMessageNotification(opts: {
   peerName: string;
   peerAvatar?: string;
   peerKey?: string;
+  groupId?: string;
+  groupName?: string;
+  sound?: 'default' | 'silent';
 }): Promise<void> {
-  if (!N) return;
+  if (Platform.OS === 'web') return;
+  const mod = await getNotifications();
   try {
-    await N.scheduleNotificationAsync({
+    const sound = opts.sound === 'silent' ? null : 'default';
+    await mod.scheduleNotificationAsync({
       content: {
-        title: opts.senderName,
-        body:  opts.preview,
-        sound: true,
+        title: opts.groupId ? (opts.groupName ?? 'Group') : opts.senderName,
+        body: opts.preview,
+        sound,
         data: {
-          type:       'message',
-          chatId:     opts.chatId,
-          peerId:     opts.peerId,
-          peerName:   opts.peerName,
+          type: opts.groupId ? 'group_message' : 'message',
+          chatId: opts.chatId,
+          peerId: opts.peerId,
+          peerName: opts.peerName,
           peerAvatar: opts.peerAvatar ?? '',
-          peerKey:    opts.peerKey   ?? '',
+          peerKey: opts.peerKey ?? '',
+          groupId: opts.groupId ?? '',
+          groupName: opts.groupName ?? '',
         },
       },
-      trigger: null, // fire immediately
+      trigger: null,
     });
-  } catch {
-    // Permission not granted or module unavailable — silently ignore
-  }
+  } catch {}
 }
 
-/** Returns a subscription object with a `.remove()` method (always safe to call). */
-export function addNotificationResponseListener(
+export async function addNotificationResponseListener(
   handler: (data: Record<string, string>) => void,
-): { remove: () => void } {
-  if (!N) return { remove: () => {} };
+): Promise<{ remove: () => void }> {
+  if (Platform.OS === 'web') return { remove: () => {} };
+  const mod = await getNotifications();
   try {
-    return N.addNotificationResponseReceivedListener((response: any) => {
-      const data = response.notification.request.content.data as Record<string, string>;
-      if (data?.type === 'message') handler(data);
+    return mod.addNotificationResponseReceivedListener((response: any) => {
+      const data = response.notification?.request?.content?.data as Record<string, string>;
+      if (data?.type === 'message' || data?.type === 'group_message') handler(data);
     });
   } catch {
     return { remove: () => {} };

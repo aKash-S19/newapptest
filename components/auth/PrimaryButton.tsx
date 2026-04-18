@@ -1,6 +1,8 @@
 import * as Haptics from 'expo-haptics';
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { Animated, Pressable, StyleSheet, Text } from 'react-native';
+
+import { useAppTheme } from '@/hooks/use-app-theme';
 
 interface PrimaryButtonProps {
   label: string;
@@ -10,10 +12,22 @@ interface PrimaryButtonProps {
 }
 
 const ENABLED_COLOR = '#4CAF82';
-const SHADOW_COLOR = '#2E7D55';
-const DISABLED_COLOR = '#C8D8CC';
-const DISABLED_SHADOW = '#B0C4B8';
 const SHADOW_HEIGHT = 5;
+
+function clampChannel(value: number) {
+  return Math.max(0, Math.min(255, value));
+}
+
+function darkenHex(hex: string, amount: number) {
+  const cleaned = hex.replace('#', '');
+  if (cleaned.length !== 6) return hex;
+  const num = parseInt(cleaned, 16);
+  const r = clampChannel(((num >> 16) & 0xff) * (1 - amount));
+  const g = clampChannel(((num >> 8) & 0xff) * (1 - amount));
+  const b = clampChannel((num & 0xff) * (1 - amount));
+  const toHex = (v: number) => v.toString(16).padStart(2, '0');
+  return `#${toHex(Math.round(r))}${toHex(Math.round(g))}${toHex(Math.round(b))}`;
+}
 
 export function PrimaryButton({
   label,
@@ -21,6 +35,7 @@ export function PrimaryButton({
   disabled = false,
   color,
 }: PrimaryButtonProps) {
+  const th = useAppTheme();
   const translateY = useRef(new Animated.Value(0)).current;
   const enabledScale = useRef(new Animated.Value(disabled ? 0.97 : 1)).current;
 
@@ -67,8 +82,25 @@ export function PrimaryButton({
     onPress();
   }, [disabled, onPress]);
 
-  const bgColor = disabled ? DISABLED_COLOR : (color ?? ENABLED_COLOR);
-  const shadowCol = disabled ? DISABLED_SHADOW : SHADOW_COLOR;
+  const baseColor = color ?? th.accent ?? ENABLED_COLOR;
+
+  const { bgColor, shadowCol, labelColor, highlightColor } = useMemo(() => {
+    if (disabled) {
+      return {
+        bgColor: th.isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.08)',
+        shadowCol: th.isDark ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.2)',
+        labelColor: th.textSoft,
+        highlightColor: th.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.35)',
+      };
+    }
+
+    return {
+      bgColor: baseColor,
+      shadowCol: darkenHex(baseColor, th.isDark ? 0.35 : 0.25),
+      labelColor: '#FFFFFF',
+      highlightColor: th.isDark ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.45)',
+    };
+  }, [baseColor, disabled, th.isDark, th.textSoft]);
 
   return (
     <Animated.View
@@ -86,9 +118,9 @@ export function PrimaryButton({
           onPressOut={handlePressOut}
           onPress={handlePress}
           disabled={disabled}
-          style={[styles.button, { backgroundColor: bgColor }]}
+          style={[styles.button, { backgroundColor: bgColor, borderTopColor: highlightColor }]}
         >
-          <Text style={[styles.label, disabled && styles.labelDisabled]}>{label}</Text>
+          <Text style={[styles.label, { color: labelColor }]}>{label}</Text>
         </Pressable>
       </Animated.View>
     </Animated.View>
@@ -109,17 +141,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     // Top highlight
     borderTopWidth: 2,
-    borderTopColor: 'rgba(255,255,255,0.45)',
     // Slightly offset upward to reveal shadow wrapper
     marginTop: -SHADOW_HEIGHT,
   },
   label: {
     fontSize: 17,
     fontWeight: '700',
-    color: '#FFFFFF',
     letterSpacing: 0.4,
-  },
-  labelDisabled: {
-    color: 'rgba(255,255,255,0.65)',
   },
 });

@@ -1,6 +1,7 @@
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
     ActivityIndicator, Alert, Platform, Pressable,
     RefreshControl, ScrollView, StyleSheet, Text, View,
@@ -10,12 +11,23 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/contexts/AuthContext';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useLayout } from '@/lib/responsive';
-import { callAuthFunction, supabaseClient } from '@/lib/supabase';
+import { callAuthFunction } from '@/lib/supabase';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type ReqUser   = { id: string; username: string };
 type Received  = { id: string; status: string; created_at: string; sender: ReqUser };
 type Sent      = { id: string; status: string; created_at: string; receiver: ReqUser };
+type GroupRequest = { 
+  id: string; 
+  group_id: string; 
+  status: string; 
+  created_at: string; 
+  added_by: string;
+  group: { id: string; name: string; description: string | null };
+  user: ReqUser;
+  added_by_user?: ReqUser;
+  group_members?: { user: ReqUser }[];
+};
 
 const ERROR = '#FF5F6D';
 
@@ -30,49 +42,41 @@ function timeAgo(iso: string) {
 export default function RequestsScreen() {
   const th = useAppTheme();
   const { isTablet } = useLayout();
-  const { sessionToken, user } = useAuth();
-  const [activeTab, setActiveTab]     = useState<'received' | 'sent'>('received');
+  const { sessionToken } = useAuth();
+  const [activeTab, setActiveTab]     = useState<'received' | 'sent' | 'groups'>('received');
   const [received,  setReceived]      = useState<Received[]>([]);
   const [sent,      setSent]          = useState<Sent[]>([]);
+  const [groupRequests, setGroupRequests] = useState<GroupRequest[]>([]);
   const [loading,   setLoading]       = useState(true);
   const [refreshing, setRefreshing]   = useState(false);
   const [acting,    setActing]        = useState<string | null>(null); // request id being processed
-  const channelRef = useRef<ReturnType<typeof supabaseClient.channel> | null>(null);
 
   // ── Fetch ────────────────────────────────────────────────────────────────
   const fetch = useCallback(async () => {
     if (!sessionToken) return;
     try {
-      const res = await callAuthFunction({ action: 'get-requests', sessionToken });
-      setReceived(res.received ?? []);
-      setSent(res.sent ?? []);
+      const [friendRes, groupRes] = await Promise.all([
+        callAuthFunction({ action: 'get-requests', sessionToken }),
+        callAuthFunction({ action: 'get-group-requests', sessionToken }),
+      ]);
+      setReceived(friendRes.received ?? []);
+      setSent(friendRes.sent ?? []);
+      setGroupRequests((groupRes.groupRequests ?? []) as GroupRequest[]);
     } catch { /* no-op */ }
     finally { setLoading(false); setRefreshing(false); }
   }, [sessionToken]);
 
-  // ── Initial load + realtime subscription ─────────────────────────────────
+  // ── Initial load + polling refresh ───────────────────────────────────────
   useEffect(() => {
     fetch();
-
-    // Subscribe to changes on friend_requests table for this user
-    if (!user?.id) return;
-    const channel = supabaseClient
-      .channel(`requests:${user.id}`)
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'friend_requests',
-          filter: `receiver_id=eq.${user.id}` },
-        () => fetch(),
-      )
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'friend_requests',
-          filter: `sender_id=eq.${user.id}` },
-        () => fetch(),
-      )
-      .subscribe();
-
-    channelRef.current = channel;
-    return () => { channel.unsubscribe(); };
-  }, [user?.id, fetch]);
+    if (!sessionToken) return;
+    const timer = setInterval(() => {
+      fetch();
+    }, 8000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [sessionToken, fetch]);
 
   // ── Actions ──────────────────────────────────────────────────────────────
   const act = useCallback(async (
@@ -97,10 +101,76 @@ export default function RequestsScreen() {
   const handleDecline = (id: string) => act(id, 'decline-request', () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light));
   const handleCancel  = (id: string) => act(id, 'cancel-request',  () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light));
 
+  const handleGroupAccept = async (requestId: string, groupId: string, targetUserId: string) => {
+    if (!sessionToken) return;
+    setActing(requestId);
+    try {
+      await callAuthFunction({ action: 'accept-group-request', sessionToken, requestId });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert('Success', 'You have joined the group!');
+      fetch();
+    } catch {
+      Alert.alert('Error', 'Could not accept invitation');
+    }
+    setActing(null);
+  };
+
+  const handleGroupDecline = async (requestId: string, groupId: string, targetUserId: string) => {
+    if (!sessionToken) return;
+    setActing(requestId);
+    try {
+      await callAuthFunction({ action: 'decline-group-request', sessionToken, requestId });
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      Alert.alert('Removed', 'You have declined the group invitation.');
+      fetch();
+    } catch {
+      Alert.alert('Error', 'Could not decline invitation');
+    }
+    setActing(null);
+  };
+
+  const handleGroupReport = async (requestId: string, groupId: string, reportedUserId: string, groupName: string) => {
+    if (!sessionToken) return;
+    Alert.alert(
+      'Report User',
+      `Are you sure you want to report this user for adding you to "${groupName}"?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { 
+          text: 'Report', 
+          style: 'destructive',
+          onPress: async () => {
+            setActing(requestId);
+            try {
+              const res = await callAuthFunction({
+                action: 'report-group-request',
+                sessionToken,
+                requestId,
+                groupId,
+                reportedUserId,
+              });
+
+              if (res?.banned) {
+                Alert.alert('Report Submitted', 'User has been banned due to multiple reports.');
+              } else {
+                Alert.alert('Report Submitted', 'The user has been reported. Thank you!');
+              }
+              
+              fetch();
+            } catch {
+              Alert.alert('Error', 'Could not submit report');
+            }
+            setActing(null);
+          }
+        }
+      ]
+    );
+  };
+
   // ── Render ───────────────────────────────────────────────────────────────
   const onRefresh = () => { setRefreshing(true); fetch(); };
 
-  const totalPending = received.length + sent.length;
+  const totalPending = received.length + sent.length + groupRequests.length;
 
   return (
     <SafeAreaView style={[s.safe, { backgroundColor: th.bg }]}>
@@ -122,7 +192,7 @@ export default function RequestsScreen() {
 
       {/* ── Tabs ── */}
       <View style={s.tabBar}>
-        {(['received', 'sent'] as const).map(tab => (
+        {(['received', 'sent', 'groups'] as const).map(tab => (
           <Pressable
             key={tab}
             style={[
@@ -138,8 +208,10 @@ export default function RequestsScreen() {
               activeTab === tab && { color: th.accent, fontFamily: 'Inter_700Bold' },
             ]}>
               {tab === 'received'
-                ? `Received${received.length ? ` (${received.length})` : ''}`
-                : `Sent${sent.length ? ` (${sent.length})` : ''}`}
+                ? `Friends${received.length ? ` (${received.length})` : ''}`
+                : tab === 'sent'
+                ? `Sent${sent.length ? ` (${sent.length})` : ''}`
+                : `Groups${groupRequests.length ? ` (${groupRequests.length})` : ''}`}
             </Text>
           </Pressable>
         ))}
@@ -218,6 +290,60 @@ export default function RequestsScreen() {
               </View>
             ))
           )}
+
+          {activeTab === 'groups' && (
+            groupRequests.length === 0 ? (
+              <View style={s.emptyWrap}>
+                <MaterialCommunityIcons name="account-group-outline" size={48} color={th.textSoft} />
+                <Text style={[s.emptyTitle, { color: th.textSoft }]}>No group invitations</Text>
+              </View>
+            ) : groupRequests.map(req => {
+              const memberNames = req.group_members?.map(m => m.user.username).join(', ') || 'No other members';
+              return (
+                <View key={req.id} style={[s.reqCard, { backgroundColor: th.cardBg, borderColor: th.border }]}>
+                  {/* Group Info */}
+                  <View style={s.reqInfo}>
+                    <View style={[s.reqAvatar, { backgroundColor: th.accent + '22' }]}>
+                      <MaterialCommunityIcons name="account-group" size={20} color={th.accent} />
+                    </View>
+                    <View style={s.reqMeta}>
+                      <Text style={[s.reqName, { color: th.textDark }]}>{req.group?.name || 'Group'}</Text>
+                      <Text style={[s.reqTime, { color: th.textSoft }]}>
+                        Added by: {req.added_by_user?.username || 'Unknown'}
+                      </Text>
+                    </View>
+                  </View>
+                  
+                  {/* Members */}
+                  <View style={[s.groupMembersInfo, { borderTopColor: th.divider }]}>
+                    <Text style={[s.groupMembersLabel, { color: th.textSoft }]}>Current members:</Text>
+                    <Text style={[s.groupMembersText, { color: th.textMed }]}>{memberNames}</Text>
+                  </View>
+                  
+                  {/* Actions */}
+                  <View style={s.reqActions}>
+                    <Pressable
+                      style={[s.actionBtnAccept, { backgroundColor: th.accent, flex: 1 }, acting === req.id && s.btnDisabled]}
+                      onPress={() => handleGroupAccept(req.id, req.group_id, req.user.id)} disabled={acting === req.id}>
+                      {acting === req.id
+                        ? <ActivityIndicator size="small" color="#fff" />
+                        : <Text style={s.actionTextAccept}>✓ Accept</Text>}
+                    </Pressable>
+                    <Pressable
+                      style={[s.actionBtnCancel, { backgroundColor: th.inputBg, flex: 1 }, acting === req.id && s.btnDisabled]}
+                      onPress={() => handleGroupDecline(req.id, req.group_id, req.user.id)} disabled={acting === req.id}>
+                      <Text style={[s.actionTextCancel, { color: th.textMed }]}>✕ Decline</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[s.actionBtnReport, { backgroundColor: ERROR + '20', flex: 1 }, acting === req.id && s.btnDisabled]}
+                      onPress={() => handleGroupReport(req.id, req.group_id, req.added_by || req.user.id, req.group?.name || 'Group')} disabled={acting === req.id}>
+                      <Text style={[s.actionTextReport, { color: ERROR }]}>⚠ Report</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              );
+            })
+          )}
         </ScrollView>
       )}
       </View>
@@ -271,4 +397,9 @@ const s = StyleSheet.create({
   actionBtnCancel:   { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, alignSelf: 'flex-start' },
   actionTextCancel:  { fontSize: 14, fontFamily: 'Inter_500Medium' },
   btnDisabled:       { opacity: 0.6 },
+  actionBtnReport:   { paddingVertical: 11, borderRadius: 12, alignItems: 'center', marginLeft: 8 },
+  actionTextReport: { fontSize: 14, fontFamily: 'Inter_600SemiBold' },
+  groupMembersInfo:  { paddingTop: 12, marginTop: 12, borderTopWidth: 1 },
+  groupMembersLabel: { fontSize: 12, fontFamily: 'Inter_500Medium', marginBottom: 4 },
+  groupMembersText:  { fontSize: 13, fontFamily: 'Inter_400Regular', lineHeight: 18 },
 });
