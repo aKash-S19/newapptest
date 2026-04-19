@@ -1,11 +1,11 @@
 import * as SecureStore from 'expo-secure-store';
 import React, {
-    createContext,
-    useCallback,
-    useContext,
-    useEffect,
-    useMemo,
-    useState,
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
 } from 'react';
 
 import { getOrCreateDeviceId } from '@/lib/deviceId';
@@ -91,6 +91,19 @@ export interface GroupMessage {
   created_at: string;
 }
 
+export type CallSignalType = 'offer' | 'answer' | 'ice' | 'end' | 'decline' | 'busy';
+
+export interface CallSignal {
+  id: string;
+  call_id: string;
+  chat_id: string;
+  from_user_id: string;
+  to_user_id: string;
+  signal_type: CallSignalType;
+  signal_payload: string | null;
+  created_at: string;
+}
+
 interface AuthContextType {
   status:         'boot' | 'unauthenticated' | 'authenticated';
   user:           UserInfo | null;
@@ -118,6 +131,9 @@ interface AuthContextType {
   removeFriend:      (peerId: string) => Promise<void>;
   sendGroupMessage:  (groupId: string, encryptedBody: string, msgType?: string, fileMeta?: { fileName?: string; fileSize?: number; mimeType?: string }) => Promise<Message>;
   getGroupMessages:  (groupId: string, before?: string) => Promise<Message[]>;
+  sendCallSignal:    (chatId: string, toUserId: string, callId: string, signalType: CallSignalType, signalPayload?: string | null) => Promise<{ id: string; created_at: string }>;
+  getCallSignals:    (chatId: string, options?: { since?: string; callId?: string }) => Promise<CallSignal[]>;
+  ackCallSignals:    (signalIds: string[]) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
@@ -291,6 +307,47 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return (res.messages ?? []) as Message[];
   }, [sessionToken]);
 
+  const sendCallSignal = useCallback(async (
+    chatId: string,
+    toUserId: string,
+    callId: string,
+    signalType: CallSignalType,
+    signalPayload?: string | null,
+  ): Promise<{ id: string; created_at: string }> => {
+    const res = await callAuthFunction({
+      action: 'send-call-signal',
+      chatId,
+      toUserId,
+      callId,
+      signalType,
+      signalPayload: signalPayload ?? null,
+      sessionToken,
+    });
+    return {
+      id: String(res?.signal?.id ?? ''),
+      created_at: String(res?.signal?.created_at ?? new Date().toISOString()),
+    };
+  }, [sessionToken]);
+
+  const getCallSignals = useCallback(async (
+    chatId: string,
+    options?: { since?: string; callId?: string },
+  ): Promise<CallSignal[]> => {
+    const res = await callAuthFunction({
+      action: 'get-call-signals',
+      chatId,
+      since: options?.since,
+      callId: options?.callId,
+      sessionToken,
+    });
+    return (res.signals ?? []) as CallSignal[];
+  }, [sessionToken]);
+
+  const ackCallSignals = useCallback(async (signalIds: string[]): Promise<void> => {
+    if (signalIds.length === 0) return;
+    await callAuthFunction({ action: 'ack-call-signals', signalIds, sessionToken });
+  }, [sessionToken]);
+
   const getMessages = useCallback(async (chatId: string, before?: string, after?: string): Promise<Message[]> => {
     const res = await callAuthFunction({ action: 'get-messages', chatId, before, after, sessionToken });
     return (res.messages ?? []) as Message[];
@@ -324,6 +381,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     sendFriendRequest, getChats,
     sendMessage, getMessages, markRead, deleteMessage, deleteChat, openChat, removeFriend,
     sendGroupMessage, getGroupMessages,
+    sendCallSignal, getCallSignals, ackCallSignals,
   }), [
     status, user, deviceUsername, sessionToken,
     register, login, loginWithUsername, recoverInit, recoverVerify,
@@ -331,6 +389,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     sendFriendRequest, getChats,
     sendMessage, getMessages, markRead, deleteMessage, deleteChat, openChat, removeFriend,
     sendGroupMessage, getGroupMessages,
+    sendCallSignal, getCallSignals, ackCallSignals,
   ]);
 
   return (

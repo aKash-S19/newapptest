@@ -14,23 +14,27 @@ import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import * as SystemUI from 'expo-system-ui';
 import React, { useEffect, useRef } from 'react';
-import { View } from 'react-native';
+import { Alert, Platform, View } from 'react-native';
 import 'react-native-reanimated';
 
 import { AuthProvider, useAuth, type ChatRow } from '@/contexts/AuthContext';
 import { SettingsProvider, useSettings } from '@/contexts/SettingsContext';
-import { addNotificationResponseListener, requestNotificationPermission, showMessageNotification } from '@/lib/notifications';
+import {
+    addNotificationResponseListener,
+    configureNotificationRuntime,
+    getExpoPushToken,
+    getLastNotificationResponseData,
+    requestNotificationPermission,
+    showIncomingCallNotification,
+    showMessageNotification,
+} from '@/lib/notifications';
 import { callAuthFunction } from '@/lib/supabase';
 
 // Keep the splash screen up while fonts load
 SplashScreen.preventAutoHideAsync();
 
 export const unstable_settings = {
-<<<<<<< HEAD
   initialRouteName: 'index',
-=======
-  initialRouteName: 'onboarding',
->>>>>>> 6d6a01c (7.3 work)
 };
 
 // Custom nav themes — override background/card so the navigator canvas
@@ -53,6 +57,20 @@ interface GroupOverviewRow {
     username: string;
   } | null;
 }
+
+interface PendingCallOffer {
+  id: string;
+  call_id: string;
+  chat_id: string;
+  from_user_id: string;
+  from_username: string;
+  from_avatar_url: string | null;
+  created_at: string;
+}
+
+const NOTIFICATION_SYNC_MS = 4000;
+const GLOBAL_CALL_POLL_MS = 600;
+const CALL_ACTION_DECLINE = 'CALL_DECLINE';
 
 function getActiveChatTargets(pathname: string): { chatId: string | null; groupId: string | null } {
   const groupMatch = pathname.match(/^\/chat\/group\/([^/]+)$/);
@@ -98,18 +116,21 @@ function RealtimeNotificationBridge({ pathname }: { pathname: string }) {
 
     const syncNotifications = async () => {
       try {
+        const allowDirect = settings.msgNotifs && !settings.dnd;
+        const allowGroups = allowDirect && !settings.muteGroups;
+
         const [chatRows, groups] = await Promise.all([
           getChats().catch(() => [] as ChatRow[]),
-          callAuthFunction({ action: 'get-groups-overview', sessionToken })
-            .then((res) => (res?.groups ?? []) as GroupOverviewRow[])
-            .catch(() => [] as GroupOverviewRow[]),
+          allowGroups
+            ? callAuthFunction({ action: 'get-groups-overview', sessionToken })
+              .then((res) => (res?.groups ?? []) as GroupOverviewRow[])
+              .catch(() => [] as GroupOverviewRow[])
+            : Promise.resolve([] as GroupOverviewRow[]),
         ]);
 
         if (cancelled) return;
 
         const active = getActiveChatTargets(pathname);
-        const allowDirect = settings.msgNotifs && !settings.dnd;
-        const allowGroups = allowDirect && !settings.muteGroups;
         const lowerUsername = String(user.username ?? '').toLowerCase();
 
         const nextDirect: Record<string, { lastMessageId: string; unreadCount: number }> = {};
@@ -137,7 +158,9 @@ function RealtimeNotificationBridge({ pathname }: { pathname: string }) {
               peerName: chat.user.username,
               peerAvatar: chat.user.avatar_url ?? '',
               peerKey: chat.peer_public_key ?? '',
-              sound: settings.notificationSound,
+              unreadCount,
+              sentAt: chat.last_message?.created_at ?? '',
+              sound: 'default',
             });
           }
 
@@ -169,7 +192,9 @@ function RealtimeNotificationBridge({ pathname }: { pathname: string }) {
               peerName: '',
               groupId: group.id,
               groupName: group.name,
-              sound: settings.notificationSound,
+              unreadCount: 1,
+              sentAt: stamp,
+              sound: 'default',
             });
           }
 
@@ -186,7 +211,7 @@ function RealtimeNotificationBridge({ pathname }: { pathname: string }) {
     syncNotifications();
     const timer = setInterval(() => {
       syncNotifications();
-    }, 3000);
+    }, NOTIFICATION_SYNC_MS);
 
     return () => {
       cancelled = true;
@@ -201,8 +226,118 @@ function RealtimeNotificationBridge({ pathname }: { pathname: string }) {
     settings.msgNotifs,
     settings.dnd,
     settings.muteGroups,
-    settings.notificationSound,
   ]);
+
+  return null;
+}
+
+function GlobalCallBridge({ pathname }: { pathname: string }) {
+  const { sessionToken } = useAuth();
+  const router = useRouter();
+  const cursorRef = useRef<string | undefined>(undefined);
+  const handledCallIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!sessionToken) {
+      cursorRef.current = undefined;
+      handledCallIdsRef.current = new Set();
+      return;
+    }
+
+    let cancelled = false;
+
+    const pollIncomingCalls = async () => {
+      try {
+        const res = await callAuthFunction({
+          action: 'get-pending-call-signals',
+          sessionToken,
+          since: cursorRef.current,
+        });
+        const offers = (res?.signals ?? []) as PendingCallOffer[];
+        if (offers.length === 0 || cancelled) return;
+
+        const isDirectChatScreen = /^\/chat\/[^/]+$/.test(pathname);
+        const isCallScreen = pathname.startsWith('/call/');
+
+        for (const offer of offers) {
+          if (!cursorRef.current || new Date(offer.created_at) > new Date(cursorRef.current)) {
+            cursorRef.current = offer.created_at;
+          }
+
+          if (handledCallIdsRef.current.has(offer.call_id)) continue;
+          handledCallIdsRef.current.add(offer.call_id);
+
+          if (cancelled || isCallScreen || isDirectChatScreen) continue;
+
+          void showIncomingCallNotification({
+            chatId: offer.chat_id,
+            callId: offer.call_id,
+            peerId: offer.from_user_id,
+            peerName: offer.from_username || 'Unknown',
+            peerAvatar: offer.from_avatar_url ?? '',
+          });
+
+          Alert.alert(
+            'Incoming call',
+            `${offer.from_username || 'Someone'} is calling you.`,
+            [
+              {
+                text: 'Decline',
+                style: 'destructive',
+                onPress: () => {
+                  void (async () => {
+                    await callAuthFunction({
+                      action: 'ack-call-signals',
+                      signalIds: [offer.id],
+                      sessionToken,
+                    }).catch(() => {});
+                    await callAuthFunction({
+                      action: 'send-call-signal',
+                      chatId: offer.chat_id,
+                      toUserId: offer.from_user_id,
+                      callId: offer.call_id,
+                      signalType: 'decline',
+                      signalPayload: null,
+                      sessionToken,
+                    }).catch(() => {});
+                  })();
+                },
+              },
+              {
+                text: 'Accept',
+                onPress: () => {
+                  router.push({
+                    pathname: '/call/[chatId]' as any,
+                    params: {
+                      chatId: offer.chat_id,
+                      peerId: offer.from_user_id,
+                      peerName: offer.from_username || 'Unknown',
+                      peerAvatar: offer.from_avatar_url ?? '',
+                      incoming: '1',
+                      callId: offer.call_id,
+                    },
+                  });
+                },
+              },
+            ],
+            { cancelable: false },
+          );
+        }
+      } catch {
+        // Keep polling in case of transient failures.
+      }
+    };
+
+    void pollIncomingCalls();
+    const timer = setInterval(() => {
+      if (!cancelled) void pollIncomingCalls();
+    }, GLOBAL_CALL_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [pathname, router, sessionToken]);
 
   return null;
 }
@@ -224,6 +359,36 @@ function AppShell() {
   useEffect(() => {
     setSyncToken(sessionToken ?? null);
   }, [sessionToken, setSyncToken]);
+
+  useEffect(() => {
+    if (!sessionToken) return;
+
+    let cancelled = false;
+
+    const registerPushToken = async () => {
+      const granted = await requestNotificationPermission();
+      if (!granted || cancelled) return;
+
+      const expoPushToken = await getExpoPushToken();
+      if (!expoPushToken || cancelled) return;
+
+      await callAuthFunction({
+        action: 'register-push-token',
+        sessionToken,
+        expoPushToken,
+        platform: Platform.OS,
+      }).catch((error) => {
+        // Keep app startup resilient if token sync fails.
+        console.warn('[push] token registration failed', error);
+      });
+    };
+
+    registerPushToken();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionToken]);
 
   useEffect(() => {
     const canCapture =
@@ -251,16 +416,14 @@ function AppShell() {
   return (
     <ThemeProvider value={dk ? DarkNavTheme : LightNavTheme}>
       <RealtimeNotificationBridge pathname={pathname} />
+      <GlobalCallBridge pathname={pathname} />
       <Stack
         screenOptions={{
           contentStyle: { backgroundColor: bg },
           animation: 'fade',
         }}
       >
-<<<<<<< HEAD
         <Stack.Screen name="index"      options={{ headerShown: false, animation: 'none' }} />
-=======
->>>>>>> 6d6a01c (7.3 work)
         <Stack.Screen name="onboarding" options={{ headerShown: false, animation: 'fade' }} />
         <Stack.Screen name="auth"     options={{ headerShown: false }} />
         <Stack.Screen name="(tabs)"   options={{ headerShown: false }} />
@@ -298,12 +461,19 @@ function AppShell() {
           }}
         />
         <Stack.Screen
+          name="call/[chatId]"
+          options={{
+            headerShown: false,
+            animation: 'slide_from_right',
+            contentStyle: { backgroundColor: bg },
+          }}
+        />
+        <Stack.Screen
           name="group/[id]"
           options={{
             headerShown: false,
             animation: 'slide_from_right',
             contentStyle: { backgroundColor: bg },
-            detachPreviousScreen: false,
           }}
         />
       </Stack>
@@ -320,18 +490,11 @@ export default function RootLayout() {
     Inter_700Bold,
   });
   const router = useRouter();
+  const handledNotificationIdRef = useRef<string>('');
 
   useEffect(() => {
     if (!fontsLoaded) return;
     SplashScreen.hideAsync();
-<<<<<<< HEAD
-=======
-    // Redirect returning users past onboarding
-    SecureStore.getItemAsync(ONBOARDING_KEY).then((val) => {
-      if (val === '1') router.replace('/auth');
-      // else stay on onboarding (default initial route)
-    });
->>>>>>> 6d6a01c (7.3 work)
   }, [fontsLoaded]);
 
   // Ask for push permission once on first launch and wire up tap-to-open-chat
@@ -339,8 +502,29 @@ export default function RootLayout() {
     let mounted = true;
     let sub: { remove: () => void } | null = null;
 
-    requestNotificationPermission();
-    addNotificationResponseListener((data) => {
+    const handleNotificationTap = (data: Record<string, string>) => {
+      const notificationId = String(data.notificationId ?? '').trim();
+      if (notificationId && handledNotificationIdRef.current === notificationId) return;
+      if (notificationId) handledNotificationIdRef.current = notificationId;
+
+      const actionIdentifier = String(data.actionIdentifier ?? '').trim();
+      if (actionIdentifier === CALL_ACTION_DECLINE) return;
+
+      if (data.type === 'call_offer' && data.chatId && data.peerId) {
+        router.push({
+          pathname: '/call/[chatId]' as any,
+          params: {
+            chatId: data.chatId,
+            peerId: data.peerId,
+            peerName: data.peerName ?? 'Unknown',
+            peerAvatar: data.peerAvatar ?? '',
+            incoming: '1',
+            callId: data.callId ?? '',
+          },
+        });
+        return;
+      }
+
       if (data.groupId) {
         router.push({
           pathname: '/chat/group/[id]' as any,
@@ -348,25 +532,42 @@ export default function RootLayout() {
         });
         return;
       }
+
       if (data.chatId) {
         router.push({
           pathname: '/chat/[id]' as any,
           params: {
-            id:          data.chatId,
-            peerId:      data.peerId,
-            peerName:    data.peerName,
-            peerAvatar:  data.peerAvatar ?? '',
-            peerKey:     data.peerKey    ?? '',
+            id: data.chatId,
+            peerId: data.peerId,
+            peerName: data.peerName,
+            peerAvatar: data.peerAvatar ?? '',
+            peerKey: data.peerKey ?? '',
           },
         });
       }
-    }).then((nextSub) => {
+    };
+
+    const setupNotifications = async () => {
+      await configureNotificationRuntime();
+      await requestNotificationPermission();
+
+      const initialTap = await getLastNotificationResponseData();
+      if (initialTap && mounted) handleNotificationTap(initialTap);
+
+      const nextSub = await addNotificationResponseListener((data) => {
+        if (!mounted) return;
+        handleNotificationTap(data);
+      });
+
       if (!mounted) {
         nextSub.remove();
         return;
       }
+
       sub = nextSub;
-    });
+    };
+
+    setupNotifications();
 
     return () => {
       mounted = false;

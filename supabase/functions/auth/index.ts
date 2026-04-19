@@ -29,8 +29,15 @@ const PIN_HASH_PREFIX = "pbkdf2_sha256";
 const PIN_HASH_ITERATIONS = 210_000;
 const SESSION_HASH_PREFIX = "sha256";
 const DEVICE_HASH_PREFIX = "sha256";
+const EXPO_PUSH_ENDPOINT = "https://exp.host/--/api/v2/push/send";
+const EXPO_PUSH_TOKEN_RE = /^(Exponent|Expo)PushToken\[[A-Za-z0-9_-]+\]$/;
 const LEGACY_HEX_HASH_RE = /^[a-f0-9]{64}$/i;
 const ENCRYPTED_PAYLOAD_RE = /^[A-Za-z0-9+/]+={0,2}\.[A-Za-z0-9+/]+={0,2}$/;
+const CALL_SIGNAL_TYPES = new Set(["offer", "answer", "ice", "end", "decline", "busy"]);
+const SUPPORTED_DIRECT_MESSAGE_TYPES = new Set(["text", "image", "file"]);
+const CALL_EVENT_MIME = "application/x-privy-call-event";
+const CALL_EVENT_FILE_PREFIX = "call:";
+const CALL_EVENT_STATUSES = new Set(["completed", "missed", "declined", "busy"]);
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -289,6 +296,162 @@ function sanitizeSettings(input: any) {
     if (type === 'object' && key === 'chatCustomizations') out[key] = sanitizeChatCustomizations(val);
   }
   return out;
+}
+
+function isValidExpoPushToken(value: string): boolean {
+  return EXPO_PUSH_TOKEN_RE.test(value.trim());
+}
+
+function messagePreviewForPush(msgType: string): string {
+  if (msgType === "image") return "Photo";
+  if (msgType === "file") return "Document";
+  if (msgType === "voice") return "Voice message";
+  if (msgType === "video") return "Video";
+  return "New message";
+}
+
+function formatPushBody(preview: string, unreadCount: number): string {
+  const count = Number.isFinite(unreadCount) ? Math.max(1, Math.floor(unreadCount)) : 1;
+  return count > 1 ? `${preview} (${count} unread)` : preview;
+}
+
+async function userHasActiveSession(
+  supabase: ReturnType<typeof adminDb>,
+  userId: string,
+): Promise<boolean> {
+  const { data: rows } = await supabase
+    .from("sessions")
+    .select("expires_at")
+    .eq("user_id", userId)
+    .limit(20);
+
+  const now = Date.now();
+  return (rows ?? []).some((row: any) => {
+    if (!row?.expires_at) return true;
+    const expiresAt = new Date(row.expires_at).getTime();
+    return Number.isFinite(expiresAt) && expiresAt > now;
+  });
+}
+
+function recipientAllowsPush(rawSettings: any, isGroup: boolean): boolean {
+  const settings = rawSettings && typeof rawSettings === "object" ? rawSettings : {};
+  if (settings.msgNotifs === false) return false;
+  if (settings.dnd === true) return false;
+  if (isGroup && settings.muteGroups === true) return false;
+  return true;
+}
+
+async function getPushEligibleUserIds(
+  supabase: ReturnType<typeof adminDb>,
+  userIds: string[],
+  isGroup: boolean,
+): Promise<string[]> {
+  if (!userIds.length) return [];
+
+  const { data: rows } = await supabase
+    .from("user_settings")
+    .select("user_id, settings")
+    .in("user_id", userIds);
+
+  const settingByUser = new Map<string, any>();
+  for (const row of rows ?? []) {
+    if (row?.user_id) settingByUser.set(String(row.user_id), row.settings ?? {});
+  }
+
+  return userIds.filter((id) => recipientAllowsPush(settingByUser.get(id), isGroup));
+}
+
+async function getActivePushTokensForUsers(
+  supabase: ReturnType<typeof adminDb>,
+  userIds: string[],
+): Promise<Array<{ userId: string; token: string }>> {
+  if (!userIds.length) return [];
+
+  const { data: rows } = await supabase
+    .from("user_push_tokens")
+    .select("user_id, expo_push_token")
+    .in("user_id", userIds)
+    .eq("is_active", true);
+
+  const seen = new Set<string>();
+  const targets: Array<{ userId: string; token: string }> = [];
+  for (const row of rows ?? []) {
+    const token = String(row?.expo_push_token ?? "").trim();
+    const userId = String(row?.user_id ?? "").trim();
+    if (!userId || !token || !isValidExpoPushToken(token) || seen.has(`${userId}:${token}`)) continue;
+    seen.add(`${userId}:${token}`);
+    targets.push({ userId, token });
+  }
+  return targets;
+}
+
+async function sendExpoPushNotifications(
+  supabase: ReturnType<typeof adminDb>,
+  messages: Array<Record<string, unknown>>,
+) {
+  if (!messages.length) return;
+
+  const invalidTokens = new Set<string>();
+
+  for (let i = 0; i < messages.length; i += 100) {
+    const chunk = messages.slice(i, i + 100);
+    try {
+      const res = await fetch(EXPO_PUSH_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Accept-Encoding": "gzip, deflate",
+        },
+        body: JSON.stringify(chunk),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.error("Expo push send failed", res.status, text.slice(0, 500));
+        continue;
+      }
+
+      const payload = await res.json().catch(() => null);
+      const tickets = Array.isArray(payload?.data) ? payload.data : [];
+      for (let j = 0; j < tickets.length; j++) {
+        const ticket = tickets[j] ?? {};
+        if (ticket?.status !== "error") continue;
+
+        const token = String(chunk[j]?.to ?? "").trim();
+        const reason = String(ticket?.details?.error ?? "");
+        const message = String(ticket?.message ?? "");
+        console.error("Expo push ticket error", reason || "unknown", message);
+
+        if (token && reason === "DeviceNotRegistered") {
+          invalidTokens.add(token);
+        }
+      }
+    } catch (error) {
+      console.error("Expo push send error", error);
+    }
+  }
+
+  if (invalidTokens.size > 0) {
+    await supabase
+      .from("user_push_tokens")
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .in("expo_push_token", Array.from(invalidTokens));
+  }
+}
+
+async function reloadSchemaCache(supabase: ReturnType<typeof adminDb>) {
+  try {
+    // Some projects expose a custom helper RPC; ignore if unavailable.
+    const { error } = await supabase.rpc("reload_schema_cache");
+    if (error) {
+      // Non-fatal: schema cache warm-up is best effort only.
+      console.warn("reload_schema_cache RPC unavailable", error.message);
+    }
+  } catch (error) {
+    // Never crash request flow due to cache refresh helper.
+    console.warn("reload schema cache failed", error);
+  }
 }
 
 Deno.serve(async (req: Request) => {
@@ -1075,6 +1238,55 @@ Deno.serve(async (req: Request) => {
     return ok({ success: true });
   }
 
+  // ── register-push-token ───────────────────────────────────────────────────
+  if (action === "register-push-token") {
+    const { expoPushToken, platform, deviceId } = body as {
+      expoPushToken?: string;
+      platform?: string;
+      deviceId?: string;
+    };
+    if (!sessionUser || !expoPushToken) return fail("Missing fields", 400);
+
+    const tokenValue = String(expoPushToken).trim();
+    if (!isValidExpoPushToken(tokenValue)) return fail("Invalid push token", 400);
+
+    await supabase
+      .from("user_push_tokens")
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq("expo_push_token", tokenValue)
+      .neq("user_id", sessionUser.id);
+
+    const { error } = await supabase.from("user_push_tokens").upsert({
+      user_id: sessionUser.id,
+      expo_push_token: tokenValue,
+      platform: typeof platform === "string" ? platform.slice(0, 20) : null,
+      device_id: typeof deviceId === "string" ? deviceId.slice(0, 120) : null,
+      is_active: true,
+      last_seen_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id,expo_push_token" });
+    if (error) return fail(error.message, 500);
+
+    return ok({ success: true });
+  }
+
+  // ── unregister-push-token ─────────────────────────────────────────────────
+  if (action === "unregister-push-token") {
+    if (!sessionUser) return fail("Unauthorized", 401);
+    const tokenValue = typeof body.expoPushToken === "string" ? body.expoPushToken.trim() : "";
+
+    let query = supabase.from("user_push_tokens").update({
+      is_active: false,
+      updated_at: new Date().toISOString(),
+    }).eq("user_id", sessionUser.id);
+
+    if (tokenValue) query = query.eq("expo_push_token", tokenValue);
+
+    const { error } = await query;
+    if (error) return fail(error.message, 500);
+    return ok({ success: true });
+  }
+
   // ── get-sessions ─────────────────────────────────────────────────────────────
   if (action === "get-sessions") {
     if (!sessionUser) return fail("Unauthorized", 401);
@@ -1181,12 +1393,14 @@ Deno.serve(async (req: Request) => {
     const keyMap: Record<string, string> = {};
     (publicKeys ?? []).forEach((k: any) => { keyMap[k.user_id] = k.public_key; });
 
-    // All messages for these chats (to find last + unread counts)
+    // Recent messages for these chats (used for last message + unread approximation)
+    const recentLimit = Math.min(1200, Math.max(chatIds.length * 20, 200));
     const { data: allMessages } = await supabase
       .from("messages")
-      .select("id, chat_id, sender_id, encrypted_body, msg_type, created_at, status")
+      .select("id, chat_id, sender_id, encrypted_body, msg_type, mime_type, created_at, status")
       .in("chat_id", chatIds)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(recentLimit);
 
     const lastMsgMap: Record<string, any> = {};
     const unreadCounts: Record<string, number> = {};
@@ -1200,6 +1414,39 @@ Deno.serve(async (req: Request) => {
           unreadCounts[m.chat_id] = (unreadCounts[m.chat_id] ?? 0) + 1;
       }
     });
+
+    const missingChatIds = chatIds.filter((chatId) => !lastMsgMap[chatId]).slice(0, 40);
+    if (missingChatIds.length > 0) {
+      const fallbackRows = await Promise.all(
+        missingChatIds.map((chatId) =>
+          supabase
+            .from("messages")
+            .select("id, chat_id, sender_id, encrypted_body, msg_type, mime_type, created_at, status")
+            .eq("chat_id", chatId)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+        ),
+      );
+
+      fallbackRows.forEach((row: any, idx: number) => {
+        if (row?.error) {
+          console.warn("get-chats fallback latest message failed", missingChatIds[idx], row.error?.message ?? row.error);
+          return;
+        }
+
+        const msg = row?.data;
+        if (!msg?.chat_id || lastMsgMap[msg.chat_id]) return;
+        lastMsgMap[msg.chat_id] = msg;
+
+        if (msg.sender_id !== uid) {
+          const lr = membershipMap[msg.chat_id]?.last_read_at;
+          if (!lr || new Date(msg.created_at) > new Date(lr)) {
+            unreadCounts[msg.chat_id] = Math.max(1, unreadCounts[msg.chat_id] ?? 0);
+          }
+        }
+      });
+    }
 
     const chats = (peerMembers ?? []).map((p: any) => {
       const ms = membershipMap[p.chat_id];
@@ -1226,6 +1473,15 @@ Deno.serve(async (req: Request) => {
     if (!sessionUser || !chatId || !encryptedBody) return fail("Missing fields", 400);
     if (!isEncryptedPayload(String(encryptedBody))) return fail("Invalid encrypted payload", 400);
     const uid = sessionUser.id;
+    const normalizedMsgType = String(msgType ?? "text").trim().toLowerCase();
+
+    if (!SUPPORTED_DIRECT_MESSAGE_TYPES.has(normalizedMsgType)) {
+      return fail("Unsupported message type", 400);
+    }
+
+    if (normalizedMsgType === "text" && (fileName || fileSize || mimeType)) {
+      return fail("Invalid text message metadata", 400);
+    }
 
     const { data: membership } = await supabase.from("chat_members")
       .select("chat_id").eq("chat_id", chatId as string).eq("user_id", uid).maybeSingle();
@@ -1233,14 +1489,156 @@ Deno.serve(async (req: Request) => {
 
     const { data: msg, error } = await supabase.from("messages").insert({
       chat_id: chatId, sender_id: uid, encrypted_body: encryptedBody,
-      msg_type: msgType, file_name: fileName ?? null,
+      msg_type: normalizedMsgType, file_name: fileName ?? null,
       file_size: fileSize ?? null, mime_type: mimeType ?? null, status: "sent",
     }).select().single();
     if (error) return fail(error.message, 500);
 
     // Keep chat.last_message_at current for sorting
     await supabase.from("chats").update({ last_message_at: msg.created_at }).eq("id", chatId as string);
+
+    try {
+      const { data: memberRows } = await supabase
+        .from("chat_members")
+        .select("user_id, last_read_at")
+        .eq("chat_id", chatId as string)
+        .neq("user_id", uid);
+      const recipients = (memberRows ?? [])
+        .map((m: any) => ({
+          userId: String(m.user_id ?? "").trim(),
+          lastReadAt: typeof m.last_read_at === "string" ? m.last_read_at : "",
+        }))
+        .filter((m: any) => m.userId);
+
+      const recipientIds = recipients.map((m: any) => m.userId);
+
+      const eligibleIds = await getPushEligibleUserIds(supabase, recipientIds, false);
+      const eligibleSet = new Set(eligibleIds);
+      const pushTargets = await getActivePushTokensForUsers(supabase, eligibleIds);
+
+      const unreadByUser = new Map<string, number>();
+      const unreadResults = await Promise.all(
+        recipients
+          .filter((recipient) => eligibleSet.has(recipient.userId))
+          .map(async (recipient) => {
+            let unreadQuery = supabase
+              .from("messages")
+              .select("id", { count: "exact", head: true })
+              .eq("chat_id", chatId as string)
+              .neq("sender_id", recipient.userId);
+
+            if (recipient.lastReadAt) {
+              unreadQuery = unreadQuery.gt("created_at", recipient.lastReadAt);
+            }
+
+            const { count } = await unreadQuery;
+            return { userId: recipient.userId, unreadCount: Math.max(1, Number(count ?? 1)) };
+          }),
+      );
+      unreadResults.forEach((entry) => {
+        unreadByUser.set(entry.userId, entry.unreadCount);
+      });
+
+      if (pushTargets.length > 0) {
+        const senderName = String(sessionUser.username ?? "New message");
+        const preview = messagePreviewForPush(String(msgType ?? "text"));
+        await sendExpoPushNotifications(
+          supabase,
+          pushTargets.map((target) => {
+            const unreadCount = unreadByUser.get(target.userId) ?? 1;
+            return {
+              to: target.token,
+              sound: "default",
+              title: "Privy",
+              subtitle: senderName,
+              body: formatPushBody(preview, unreadCount),
+              priority: "high",
+              channelId: "default",
+              badge: unreadCount,
+              data: {
+                type: "message",
+                chatId: String(chatId),
+                peerId: uid,
+                peerName: senderName,
+                peerAvatar: String(sessionUser.avatar_url ?? ""),
+                peerKey: "",
+                groupId: "",
+                groupName: "",
+                unreadCount: String(unreadCount),
+                sentAt: String(msg.created_at ?? new Date().toISOString()),
+              },
+            };
+          }),
+        );
+      }
+    } catch (pushError) {
+      console.error("send-message push dispatch failed", pushError);
+    }
+
     return ok({ message: msg });
+  }
+
+  // ── log-call-event ───────────────────────────────────────────────────────────
+  if (action === "log-call-event") {
+    const { chatId, callId, status, durationSeconds, encryptedBody } = body as {
+      chatId?: string;
+      callId?: string;
+      status?: string;
+      durationSeconds?: number;
+      encryptedBody?: string;
+    };
+    if (!sessionUser || !chatId || !callId || !status || !encryptedBody) return fail("Missing fields", 400);
+    if (!isEncryptedPayload(String(encryptedBody))) return fail("Invalid encrypted payload", 400);
+
+    const normalizedStatus = String(status).trim().toLowerCase();
+    if (!CALL_EVENT_STATUSES.has(normalizedStatus)) return fail("Invalid call status", 400);
+
+    const uid = sessionUser.id;
+    const trimmedCallId = String(callId).trim();
+    if (!trimmedCallId) return fail("Invalid call id", 400);
+
+    const { data: membership } = await supabase.from("chat_members")
+      .select("chat_id")
+      .eq("chat_id", chatId as string)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!membership) return fail("Not a member of this chat", 403);
+
+    const eventFileName = `${CALL_EVENT_FILE_PREFIX}${trimmedCallId.slice(0, 120)}`;
+
+    const { data: existing } = await supabase
+      .from("messages")
+      .select("id, chat_id, sender_id, encrypted_body, msg_type, file_name, file_size, mime_type, status, created_at")
+      .eq("chat_id", chatId as string)
+      .eq("file_name", eventFileName)
+      .eq("mime_type", CALL_EVENT_MIME)
+      .maybeSingle();
+
+    if (existing) return ok({ message: existing, alreadyLogged: true });
+
+    const duration = Number.isFinite(Number(durationSeconds))
+      ? Math.max(0, Math.min(60 * 60 * 12, Math.floor(Number(durationSeconds))))
+      : 0;
+
+    const { data: msg, error } = await supabase
+      .from("messages")
+      .insert({
+        chat_id: chatId,
+        sender_id: uid,
+        encrypted_body: encryptedBody,
+        msg_type: "text",
+        file_name: eventFileName,
+        file_size: duration,
+        mime_type: CALL_EVENT_MIME,
+        status: "sent",
+      })
+      .select()
+      .single();
+    if (error) return fail(error.message, 500);
+
+    await supabase.from("chats").update({ last_message_at: msg.created_at }).eq("id", chatId as string);
+
+    return ok({ message: msg, alreadyLogged: false });
   }
 
   // ── send-group-message ─────────────────────────────────────────────────────────
@@ -1252,7 +1650,7 @@ Deno.serve(async (req: Request) => {
 
     const { data: groupState } = await supabase
       .from("groups")
-      .select("id, is_archived")
+      .select("id, is_archived, name, mute_notifications")
       .eq("id", groupId as string)
       .maybeSingle();
     if (!groupState || groupState.is_archived) return fail("Group not found", 404);
@@ -1274,6 +1672,88 @@ Deno.serve(async (req: Request) => {
     if (error) return fail(error.message, 500);
 
     await supabase.from("groups").update({ last_activity: msg.created_at }).eq("id", groupId as string);
+
+    if (!groupState.mute_notifications) {
+      try {
+        const { data: memberRows } = await supabase
+          .from("group_members")
+          .select("user_id, last_read_at")
+          .eq("group_id", groupId as string)
+          .neq("user_id", uid);
+        const recipients = (memberRows ?? [])
+          .map((m: any) => ({
+            userId: String(m.user_id ?? "").trim(),
+            lastReadAt: typeof m.last_read_at === "string" ? m.last_read_at : "",
+          }))
+          .filter((m: any) => m.userId);
+        const recipientIds = recipients.map((m: any) => m.userId);
+
+        const eligibleIds = await getPushEligibleUserIds(supabase, recipientIds, true);
+        const eligibleSet = new Set(eligibleIds);
+        const pushTargets = await getActivePushTokensForUsers(supabase, eligibleIds);
+
+        const unreadByUser = new Map<string, number>();
+        const unreadResults = await Promise.all(
+          recipients
+            .filter((recipient) => eligibleSet.has(recipient.userId))
+            .map(async (recipient) => {
+              let unreadQuery = supabase
+                .from("messages")
+                .select("id", { count: "exact", head: true })
+                .eq("group_id", groupId as string)
+                .neq("sender_id", recipient.userId);
+
+              if (recipient.lastReadAt) {
+                unreadQuery = unreadQuery.gt("created_at", recipient.lastReadAt);
+              }
+
+              const { count } = await unreadQuery;
+              return { userId: recipient.userId, unreadCount: Math.max(1, Number(count ?? 1)) };
+            }),
+        );
+        unreadResults.forEach((entry) => {
+          unreadByUser.set(entry.userId, entry.unreadCount);
+        });
+
+        if (pushTargets.length > 0) {
+          const senderName = String(sessionUser.username ?? "Someone");
+          const groupName = String(groupState.name ?? "Group");
+          const preview = `${senderName}: ${messagePreviewForPush(String(msgType ?? "text"))}`;
+
+          await sendExpoPushNotifications(
+            supabase,
+            pushTargets.map((target) => {
+              const unreadCount = unreadByUser.get(target.userId) ?? 1;
+              return {
+                to: target.token,
+                sound: "default",
+                title: "Privy",
+                subtitle: groupName,
+                body: formatPushBody(preview, unreadCount),
+                priority: "high",
+                channelId: "default",
+                badge: unreadCount,
+                data: {
+                  type: "group_message",
+                  groupId: String(groupId),
+                  groupName,
+                  chatId: "",
+                  peerId: uid,
+                  peerName: senderName,
+                  peerAvatar: String(sessionUser.avatar_url ?? ""),
+                  peerKey: "",
+                  unreadCount: String(unreadCount),
+                  sentAt: String(msg.created_at ?? new Date().toISOString()),
+                },
+              };
+            }),
+          );
+        }
+      } catch (pushError) {
+        console.error("send-group-message push dispatch failed", pushError);
+      }
+    }
+
     return ok({ message: msg });
   }
 
@@ -1301,17 +1781,45 @@ Deno.serve(async (req: Request) => {
     const activeGroupIds = (groups ?? []).map((g: any) => g.id as string).filter(Boolean);
     if (activeGroupIds.length === 0) return ok({ groups: [] });
 
-    const { data: messages } = await supabase
+    const recentLimit = Math.min(1200, Math.max(activeGroupIds.length * 12, 200));
+    const { data: recentMessages, error: recentMessagesError } = await supabase
       .from("messages")
-      .select("id, group_id, sender_id, encrypted_body, created_at")
+      .select("id, group_id, sender_id, created_at")
       .in("group_id", activeGroupIds)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(recentLimit);
+    if (recentMessagesError) return fail(recentMessagesError.message, 500);
 
     const lastByGroup: Record<string, any> = {};
-    (messages ?? []).forEach((m: any) => {
+    (recentMessages ?? []).forEach((m: any) => {
       if (!m.group_id) return;
       if (!lastByGroup[m.group_id]) lastByGroup[m.group_id] = m;
     });
+
+    const missingGroupIds = activeGroupIds.filter((groupId) => !lastByGroup[groupId]).slice(0, 30);
+    if (missingGroupIds.length > 0) {
+      const fallbackRows = await Promise.all(
+        missingGroupIds.map((groupId) =>
+          supabase
+            .from("messages")
+            .select("id, group_id, sender_id, created_at")
+            .eq("group_id", groupId)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+        ),
+      );
+
+      fallbackRows.forEach((row: any, idx: number) => {
+        if (row?.error) {
+          console.warn("get-groups-overview fallback latest message failed", missingGroupIds[idx], row.error?.message ?? row.error);
+          return;
+        }
+        if (row?.data?.group_id && !lastByGroup[row.data.group_id]) {
+          lastByGroup[row.data.group_id] = row.data;
+        }
+      });
+    }
 
     const senderIds = [...new Set(Object.values(lastByGroup).map((m: any) => m.sender_id as string).filter(Boolean))];
     const { data: senders } = senderIds.length > 0
@@ -2065,6 +2573,236 @@ Deno.serve(async (req: Request) => {
     await supabase.from("messages").update({ status: "read" })
       .eq("chat_id", chatId as string).neq("sender_id", uid).in("status", ["sent", "delivered"]);
     return ok({ success: true });
+  }
+
+  // ── send-call-signal ─────────────────────────────────────────────────────────
+  if (action === "send-call-signal") {
+    const { chatId, toUserId, callId, signalType, signalPayload } = body as {
+      chatId?: string;
+      toUserId?: string;
+      callId?: string;
+      signalType?: string;
+      signalPayload?: string | null;
+    };
+    if (!sessionUser || !chatId || !toUserId || !callId || !signalType) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+    if (uid === toUserId) return fail("Cannot signal yourself", 400);
+    if (!CALL_SIGNAL_TYPES.has(signalType)) return fail("Invalid signal type", 400);
+
+    const payload = typeof signalPayload === "string" ? signalPayload.trim() : null;
+    if ((signalType === "offer" || signalType === "answer" || signalType === "ice") && !payload) {
+      return fail("Missing signal payload", 400);
+    }
+    if (payload && payload.length > 120000) return fail("Signal payload too large", 413);
+
+    const { count: memberCount } = await supabase
+      .from("chat_members")
+      .select("user_id", { count: "exact", head: true })
+      .eq("chat_id", chatId as string);
+    if ((memberCount ?? 0) !== 2) return fail("Voice calls are only available in 1:1 chats", 400);
+
+    const { data: pairMembers } = await supabase
+      .from("chat_members")
+      .select("user_id")
+      .eq("chat_id", chatId as string)
+      .in("user_id", [uid, toUserId as string]);
+    if ((pairMembers ?? []).length < 2) return fail("Users are not in this chat", 403);
+
+    let recipientPushTargets: Array<{ userId: string; token: string }> = [];
+    let recipientReachable = true;
+    if (signalType === "offer") {
+      recipientPushTargets = await getActivePushTokensForUsers(supabase, [String(toUserId)]);
+      const hasActiveSession = await userHasActiveSession(supabase, String(toUserId));
+      recipientReachable = hasActiveSession || recipientPushTargets.length > 0;
+      if (!recipientReachable) {
+        return fail("User is not available at the moment", 409);
+      }
+    }
+
+    const expiresAt = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+    const { data: signal, error } = await supabase
+      .from("call_signals")
+      .insert({
+        call_id: callId,
+        chat_id: chatId,
+        from_user_id: uid,
+        to_user_id: toUserId,
+        signal_type: signalType,
+        signal_payload: payload,
+        expires_at: expiresAt,
+      })
+      .select("id, call_id, chat_id, from_user_id, to_user_id, signal_type, signal_payload, created_at")
+      .single();
+    if (error) return fail(error.message, 500);
+
+    if (signalType === "offer" && recipientPushTargets.length > 0) {
+      try {
+        const { data: senderRow } = await supabase
+          .from("users")
+          .select("username, avatar_url")
+          .eq("id", uid)
+          .maybeSingle();
+
+        const senderName = String(senderRow?.username ?? "Someone");
+        const senderAvatar = String(senderRow?.avatar_url ?? "");
+
+        await sendExpoPushNotifications(
+          supabase,
+          recipientPushTargets.map((target) => ({
+            to: target.token,
+            sound: "default",
+            title: "Privy",
+            subtitle: senderName,
+            body: "Incoming voice call",
+            priority: "high",
+            channelId: "calls",
+            data: {
+              type: "call_offer",
+              chatId: String(chatId),
+              callId: String(callId),
+              peerId: uid,
+              peerName: senderName,
+              peerAvatar: senderAvatar,
+            },
+          })),
+        );
+      } catch (pushError) {
+        console.error("send-call-signal push dispatch failed", pushError);
+      }
+    }
+
+    return ok({ signal, recipientReachable });
+  }
+
+  // ── get-pending-call-signals ──────────────────────────────────────────────
+  if (action === "get-pending-call-signals") {
+    const { since } = body as { since?: string };
+    if (!sessionUser) return fail("Unauthorized", 401);
+    const uid = sessionUser.id;
+
+    let q = supabase
+      .from("call_signals")
+      .select("id, call_id, chat_id, from_user_id, to_user_id, signal_type, signal_payload, created_at, expires_at")
+      .eq("to_user_id", uid)
+      .eq("signal_type", "offer")
+      .is("consumed_at", null)
+      .order("created_at", { ascending: true })
+      .limit(100);
+    if (since) q = q.gt("created_at", since as string);
+
+    const { data: rows, error } = await q;
+    if (error) return fail(error.message, 500);
+
+    const now = Date.now();
+    const activeRows = (rows ?? []).filter((row: any) => !row.expires_at || new Date(row.expires_at).getTime() > now);
+    if (activeRows.length === 0) return ok({ signals: [] });
+
+    const senderIds = [...new Set(activeRows.map((row: any) => String(row.from_user_id)).filter(Boolean))];
+    const { data: senderRows } = senderIds.length > 0
+      ? await supabase.from("users").select("id, username, avatar_url").in("id", senderIds)
+      : { data: [] };
+    const senderMap = new Map<string, { username: string; avatar_url: string | null }>();
+    (senderRows ?? []).forEach((row: any) => {
+      senderMap.set(String(row.id), {
+        username: String(row.username ?? "Unknown"),
+        avatar_url: row.avatar_url ?? null,
+      });
+    });
+
+    const signals = activeRows.map((row: any) => {
+      const sender = senderMap.get(String(row.from_user_id));
+      return {
+        id: row.id,
+        call_id: row.call_id,
+        chat_id: row.chat_id,
+        from_user_id: row.from_user_id,
+        to_user_id: row.to_user_id,
+        signal_type: row.signal_type,
+        signal_payload: row.signal_payload,
+        created_at: row.created_at,
+        from_username: sender?.username ?? "Unknown",
+        from_avatar_url: sender?.avatar_url ?? null,
+      };
+    });
+
+    return ok({ signals });
+  }
+
+  // ── get-call-signals ────────────────────────────────────────────────────────
+  if (action === "get-call-signals") {
+    const { chatId, callId, since } = body as {
+      chatId?: string;
+      callId?: string;
+      since?: string;
+    };
+    if (!sessionUser || !chatId) return fail("Missing fields", 400);
+    const uid = sessionUser.id;
+
+    const { count: memberCount } = await supabase
+      .from("chat_members")
+      .select("user_id", { count: "exact", head: true })
+      .eq("chat_id", chatId as string);
+    if ((memberCount ?? 0) !== 2) return fail("Voice calls are only available in 1:1 chats", 400);
+
+    const { data: membership } = await supabase
+      .from("chat_members")
+      .select("chat_id")
+      .eq("chat_id", chatId as string)
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (!membership) return fail("Not a member of this chat", 403);
+
+    let q = supabase
+      .from("call_signals")
+      .select("id, call_id, chat_id, from_user_id, to_user_id, signal_type, signal_payload, created_at, expires_at")
+      .eq("chat_id", chatId as string)
+      .eq("to_user_id", uid)
+      .is("consumed_at", null)
+      .order("created_at", { ascending: true })
+      .limit(100);
+    if (callId) q = q.eq("call_id", callId as string);
+    if (since) q = q.gt("created_at", since as string);
+
+    const { data: rows, error } = await q;
+    if (error) return fail(error.message, 500);
+
+    const now = Date.now();
+    const signals = (rows ?? [])
+      .filter((row: any) => !row.expires_at || new Date(row.expires_at).getTime() > now)
+      .map((row: any) => ({
+        id: row.id,
+        call_id: row.call_id,
+        chat_id: row.chat_id,
+        from_user_id: row.from_user_id,
+        to_user_id: row.to_user_id,
+        signal_type: row.signal_type,
+        signal_payload: row.signal_payload,
+        created_at: row.created_at,
+      }));
+
+    return ok({ signals });
+  }
+
+  // ── ack-call-signals ────────────────────────────────────────────────────────
+  if (action === "ack-call-signals") {
+    const { signalIds } = body as { signalIds?: string[] };
+    if (!sessionUser || !Array.isArray(signalIds) || signalIds.length === 0) {
+      return fail("Missing signalIds", 400);
+    }
+    const uid = sessionUser.id;
+    const ids = Array.from(new Set(signalIds.filter((id) => typeof id === "string" && id.trim().length > 0))).slice(0, 200);
+    if (ids.length === 0) return fail("Missing signalIds", 400);
+
+    const { data, error } = await supabase
+      .from("call_signals")
+      .update({ consumed_at: new Date().toISOString() })
+      .in("id", ids)
+      .eq("to_user_id", uid)
+      .is("consumed_at", null)
+      .select("id");
+    if (error) return fail(error.message, 500);
+
+    return ok({ success: true, acked: (data ?? []).length });
   }
 
   // ── open-chat ──────────────────────────────────────────────────────────────

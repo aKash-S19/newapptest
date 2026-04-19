@@ -20,6 +20,9 @@ expo-env.d.ts
 *.crt
 *.cer
 *.mobileprovision
+google-services.json
+GoogleService-Info.plist
+credentials.json
 
 # Metro
 .metro-health-check*
@@ -28,6 +31,7 @@ expo-env.d.ts
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+pnpm-debug.log*
 
 # macOS
 .DS_Store
@@ -36,6 +40,7 @@ yarn-error.*
 # env files
 .env
 .env.*
+.envrc
 !.env.example
 
 # typescript
@@ -50,10 +55,7 @@ app-example
 # Supabase Local
 /supabase/.temp/
 /supabase/.branch/
-<<<<<<< HEAD
 supabase.tar.gz
-=======
->>>>>>> 6d6a01c (7.3 work)
 
 # Editor swap / backup files
 *.swp
@@ -68,10 +70,16 @@ Thumbs.db
 # Logs
 *.log
 logs/
+coverage/
 
 # Python local environments
 .venv/
 venv/
+
+# EAS / local build outputs
+*.apk
+*.aab
+eas-build-*.json
 
 # Root-level local exports and temp artifacts
 /nul

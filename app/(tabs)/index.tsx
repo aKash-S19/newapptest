@@ -54,6 +54,47 @@ function isLightColor(hex: string): boolean {
   return luma > 0.8;
 }
 
+type CallEventStatus = 'completed' | 'missed' | 'declined' | 'busy';
+
+function formatCallDuration(totalSeconds: number): string {
+  const mins = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+  const secs = (totalSeconds % 60).toString().padStart(2, '0');
+  return `${mins}:${secs}`;
+}
+
+function formatCallEventPreview(raw: string): string | null {
+  try {
+    const parsed = JSON.parse(raw) as {
+      kind?: string;
+      status?: string;
+      durationSeconds?: number;
+    };
+    if (parsed.kind !== 'call_event') return null;
+
+    const status = String(parsed.status ?? '').trim().toLowerCase() as CallEventStatus;
+    if (status !== 'completed' && status !== 'missed' && status !== 'declined' && status !== 'busy') {
+      return null;
+    }
+
+    const duration = Number.isFinite(Number(parsed.durationSeconds))
+      ? Math.max(0, Math.floor(Number(parsed.durationSeconds)))
+      : 0;
+
+    if (status === 'completed') {
+      return duration > 0
+        ? `📞 Voice call (${formatCallDuration(duration)})`
+        : '📞 Voice call';
+    }
+    if (status === 'missed') return '📵 Missed voice call';
+    if (status === 'declined') return '📵 Call declined';
+    return '📵 User busy';
+  } catch {
+    return null;
+  }
+}
+
+const CHATS_REFRESH_MS = 4000;
+
 export default function ChatsScreen() {
   const th = useAppTheme();
   const { isTablet } = useLayout();
@@ -166,7 +207,8 @@ export default function ChatsScreen() {
           const key = await getSharedKey(chat.user.id, chat.peer_public_key);
           const raw = await decryptMessage(key, chat.last_message.encrypted_body);
           if (chat.last_message.msg_type === 'text') {
-            previews[chat.chat_id] = raw.length > 60 ? raw.slice(0, 60) + '…' : raw;
+            const callEventPreview = formatCallEventPreview(raw);
+            previews[chat.chat_id] = callEventPreview ?? (raw.length > 60 ? raw.slice(0, 60) + '…' : raw);
           } else if (chat.last_message.msg_type === 'image') {
             previews[chat.chat_id] = '📷 Photo';
           } else if (chat.last_message.msg_type === 'voice') {
@@ -192,7 +234,7 @@ export default function ChatsScreen() {
     const timer = setInterval(() => {
       fetchChats();
       fetchPending();
-    }, 7000);
+    }, CHATS_REFRESH_MS);
     return () => {
       clearInterval(timer);
     };

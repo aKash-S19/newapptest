@@ -8,6 +8,36 @@ Contribution note: land small docs/chore updates on main regularly to keep the G
 
 ## Changelog
 
+### Apr 19 2026 — Major Calls Update, Group Reliability & APK Readiness
+
+- Added full 1:1 call signaling pipeline through edge actions:
+	- `send-call-signal`, `get-call-signals`, `get-pending-call-signals`, `ack-call-signals`
+	- encrypted offer/answer/ICE payload relay and reachability checks before ringing
+- Added call UI and call entry flow:
+	- dedicated call route/screen (`app/call/[chatId].tsx`)
+	- in-chat call button and incoming-call accept/decline prompts
+	- call timeout/end handling and call event logging
+- Added verified call history events in chat:
+	- backend action `log-call-event` stores call event markers (`application/x-privy-call-event`)
+	- direct chat and chats list now render human-readable call previews instead of raw JSON payloads
+- Upgraded incoming call notifications:
+	- call category/actions, ringtone-oriented Android channel audio usage, sticky/time-sensitive behavior
+	- tap handling supports call routing and decline action filtering
+- Improved delivery speed and backend efficiency:
+	- faster polling intervals for direct chat, group chat, chats list and global notification bridge
+	- `get-chats`/`get-groups-overview` optimized with bounded recent scans + fallback latest-message lookup
+	- unread-count work for push metadata parallelized in direct/group send flows
+- Added push token lifecycle support and dispatch hardening:
+	- register/unregister device push token actions
+	- token validation, deduplication, inactive-token cleanup (`DeviceNotRegistered`)
+- Fixed group key recovery and group open reliability:
+	- auto-rekey fallback for admin on group-key decrypt mismatch (`invalid ghash tag`)
+	- admin re-wrap sync for all members to heal stale key rows
+	- added transient gateway retry/fallback handling for group context fetch
+- App identity/build updates:
+	- mobile app display name now `Privy`
+	- added EAS `apk` profile for installable Android builds
+
 ### Apr 19 2026 — Groups, Notifications, Privacy Controls & Git Hygiene
 
 - Added full group chat surfaces and navigation:
@@ -62,6 +92,12 @@ Contribution note: land small docs/chore updates on main regularly to keep the G
 	 - `npx supabase functions deploy auth --project-ref <project-ref> --no-verify-jwt`
 4. Run smoke tests for register/login, direct chat send, group chat send, request accept/decline/report.
 5. Build signed Android release via EAS and submit to Play Console.
+
+### Quick APK Build (Internal Testing)
+
+1. Ensure EAS auth is active: `npx eas whoami`
+2. Build installable APK: `npx eas build -p android --profile apk`
+3. Download the APK from the build URL shown by EAS and install on device.
 
 ### Mar 7 2026 — E2EE Chat, File Sharing, Onboarding & More
 

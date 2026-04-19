@@ -69,6 +69,16 @@ function isGroupUnavailableError(error: unknown): boolean {
   return msg.includes('group not found') || msg.includes('not a group member');
 }
 
+function isGroupKeyDecryptError(error: unknown): boolean {
+  const msg = errorMessage(error).toLowerCase();
+  return msg.includes('invalid ghash tag') || msg.includes('decrypt');
+}
+
+function isTransientGatewayError(error: unknown): boolean {
+  const msg = errorMessage(error).toLowerCase();
+  return msg.includes('server error 502') || msg.includes('server error 503') || msg.includes('server error 504') || msg.includes('bad gateway') || msg.includes('upstream connect');
+}
+
 function parseGroupPayload(msg: BaseMessage, plaintext: string): Pick<GroupMessage, 'text' | 'imageB64' | 'fileData'> {
   if (msg.msg_type === 'image') {
     let imageB64 = '';
@@ -98,6 +108,7 @@ function matchesPendingGroupMessage(pending: GroupMessage, incoming: GroupMessag
 }
 
 const GroupChatScreen = () => {
+  const GROUP_MESSAGE_POLL_MS = 1800;
   const { id: groupId } = useLocalSearchParams<{ id: string }>();
   const { user, sessionToken, sendGroupMessage, getGroupMessages } = useAuth();
   const th = useAppTheme();
@@ -107,6 +118,7 @@ const GroupChatScreen = () => {
   const knownMessageIdsRef = useRef<Set<string>>(new Set());
   const latestMessageAtRef = useRef<string | null>(null);
   const handledMissingGroupRef = useRef(false);
+  const contextRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [messages, setMessages] = useState<GroupMessage[]>([]);
   const [groupInfo, setGroupInfo] = useState<GroupInfo | null>(null);
@@ -130,6 +142,10 @@ const GroupChatScreen = () => {
       const res = await callAuthFunction({ action: 'get-group-chat-context', sessionToken, groupId });
       if (res?.group) setGroupInfo(res.group as GroupInfo);
       if (Array.isArray(res?.members)) setMembers(res.members as any[]);
+      if (contextRetryTimerRef.current) {
+        clearTimeout(contextRetryTimerRef.current);
+        contextRetryTimerRef.current = null;
+      }
     } catch (error) {
       if (isGroupUnavailableError(error)) {
         if (!handledMissingGroupRef.current) {
@@ -140,6 +156,27 @@ const GroupChatScreen = () => {
         return;
       }
       console.error('Error fetching group context:', error);
+
+      if (isTransientGatewayError(error) && !contextRetryTimerRef.current) {
+        contextRetryTimerRef.current = setTimeout(() => {
+          contextRetryTimerRef.current = null;
+          void (async () => {
+            try {
+              const retryRes = await callAuthFunction({ action: 'get-group-chat-context', sessionToken, groupId });
+              if (retryRes?.group) setGroupInfo(retryRes.group as GroupInfo);
+              if (Array.isArray(retryRes?.members)) setMembers(retryRes.members as any[]);
+            } catch (retryError) {
+              if (isGroupUnavailableError(retryError) && !handledMissingGroupRef.current) {
+                handledMissingGroupRef.current = true;
+                Alert.alert('Group unavailable', 'This group no longer exists or you no longer have access.');
+                router.replace('/(tabs)/groups');
+                return;
+              }
+              console.error('Retry fetching group context failed:', retryError);
+            }
+          })();
+        }, 2200);
+      }
     }
   }, [groupId, sessionToken, router]);
 
@@ -224,6 +261,7 @@ const GroupChatScreen = () => {
       const state = await callAuthFunction({ action: 'get-group-key-state', sessionToken, groupId });
       const role = String(state?.role ?? 'member');
       const memberIds = Array.isArray(state?.memberIds) ? (state.memberIds as string[]) : [];
+      const uniqueMemberIds = Array.from(new Set(memberIds.filter(Boolean)));
       const existing = new Set(
         Array.isArray(state?.existingKeyUserIds) ? (state.existingKeyUserIds as string[]) : [],
       );
@@ -258,15 +296,22 @@ const GroupChatScreen = () => {
 
       const syncMissing = async (key: Uint8Array) => {
         if (role !== 'admin') return;
-        const missing = memberIds.filter((id) => !existing.has(id));
+        const missing = uniqueMemberIds.filter((id) => !existing.has(id));
         if (missing.length === 0) return;
         await upsertFor(key, missing);
+      };
+
+      const syncAllForAdmin = async (key: Uint8Array) => {
+        if (role !== 'admin') return;
+        if (uniqueMemberIds.length === 0) return;
+        await upsertFor(key, uniqueMemberIds);
       };
 
       const cached = await getStoredGroupKey(groupId);
       if (cached) {
         setGroupKey(cached);
-        await syncMissing(cached);
+        // Always refresh wrapped keys for admins to heal stale recipient key material.
+        await syncAllForAdmin(cached);
         return;
       }
 
@@ -274,26 +319,52 @@ const GroupChatScreen = () => {
       if (ownKey?.encrypted_key) {
         const senderPublicKey = String(state?.senderPublicKey ?? '');
         if (!senderPublicKey) {
-          setGroupKeyError('Missing key material');
+          if (role !== 'admin') {
+            setGroupKeyError('Group key unavailable. Ask a group admin to refresh keys.');
+            setLoading(false);
+            return;
+          }
+          const newKey = generateGroupKey();
+          await upsertFor(newKey, uniqueMemberIds);
+          await storeGroupKey(groupId, newKey);
+          setGroupKey(newKey);
           return;
         }
-        const key = await decryptGroupKeyFromPeer(senderPublicKey, ownKey.encrypted_key);
-        await storeGroupKey(groupId, key);
-        setGroupKey(key);
-        await syncMissing(key);
+        try {
+          const key = await decryptGroupKeyFromPeer(senderPublicKey, ownKey.encrypted_key);
+          await storeGroupKey(groupId, key);
+          setGroupKey(key);
+          await syncAllForAdmin(key);
+        } catch (decryptError) {
+          if (role === 'admin' && isGroupKeyDecryptError(decryptError)) {
+            const newKey = generateGroupKey();
+            await upsertFor(newKey, uniqueMemberIds);
+            await storeGroupKey(groupId, newKey);
+            setGroupKey(newKey);
+            return;
+          }
+
+          if (isGroupKeyDecryptError(decryptError)) {
+            setGroupKeyError('Group key is out of sync. Ask a group admin to refresh keys.');
+            setLoading(false);
+            return;
+          }
+
+          throw decryptError;
+        }
         return;
       }
 
       if (role !== 'admin') {
-        setGroupKeyError('Group key unavailable');
+        setGroupKeyError('Group key unavailable. Ask a group admin to refresh keys.');
+        setLoading(false);
         return;
       }
 
       const newKey = generateGroupKey();
-      await upsertFor(newKey, memberIds);
+      await upsertFor(newKey, uniqueMemberIds);
       await storeGroupKey(groupId, newKey);
       setGroupKey(newKey);
-      await syncMissing(newKey);
     } catch (error) {
       if (isGroupUnavailableError(error)) {
         if (!handledMissingGroupRef.current) {
@@ -305,8 +376,18 @@ const GroupChatScreen = () => {
       }
       console.error('Error ensuring group key:', error);
       setGroupKeyError('Group key unavailable');
+      setLoading(false);
     }
   }, [groupId, sessionToken, user, router]);
+
+  useEffect(() => {
+    return () => {
+      if (contextRetryTimerRef.current) {
+        clearTimeout(contextRetryTimerRef.current);
+        contextRetryTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     fetchGroupContext();
@@ -336,7 +417,7 @@ const GroupChatScreen = () => {
       if (updates.length > 0) {
         latestMessageAtRef.current = updates[updates.length - 1].created_at;
       }
-    }, 3000);
+    }, GROUP_MESSAGE_POLL_MS);
 
     return () => {
       cancelled = true;
@@ -589,9 +670,27 @@ const GroupChatScreen = () => {
       >
         {/* Messages list */}
         {loading ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color={th.accent} />
-          </View>
+          groupKeyError ? (
+            <View style={styles.loadingContainer}>
+              <MaterialCommunityIcons name="alert-circle-outline" size={30} color={th.error} />
+              <Text style={[styles.keyErrorText, { color: th.textDark }]}>{groupKeyError}</Text>
+              <Pressable
+                style={[styles.retryBtn, { backgroundColor: th.accent }]}
+                onPress={() => {
+                  setGroupKeyError(null);
+                  setLoading(true);
+                  void fetchGroupContext();
+                  void ensureGroupKey();
+                }}
+              >
+                <Text style={styles.retryBtnText}>Retry</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color={th.accent} />
+            </View>
+          )
         ) : (
           <FlatList
             ref={flatListRef}
@@ -688,6 +787,24 @@ const styles = StyleSheet.create({
   headerSubtitle: { fontSize: 13 },
   infoButton: { padding: 8 },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  keyErrorText: {
+    marginTop: 12,
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
+    paddingHorizontal: 24,
+  },
+  retryBtn: {
+    marginTop: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  retryBtnText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
   messagesList: { paddingHorizontal: 16, paddingTop: 8, flexGrow: 1 },
   dateContainer: { alignItems: 'center', marginVertical: 12 },
   dateText: {

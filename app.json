@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "newapptest",
+    "name": "Privy",
     "slug": "newapptest",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -9,11 +9,18 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Privy needs microphone access for secure voice calls."
+      }
     },
     "android": {
       "allowBackup": false,
       "usesCleartextTraffic": false,
+      "permissions": [
+        "RECORD_AUDIO",
+        "MODIFY_AUDIO_SETTINGS"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -41,7 +48,8 @@
           }
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "@config-plugins/react-native-webrtc"
     ],
     "experiments": {
       "typedRoutes": true,

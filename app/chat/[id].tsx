@@ -4,6 +4,7 @@
  */
 
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
+import { useIsFocused } from '@react-navigation/native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Haptics from 'expo-haptics';
@@ -31,21 +32,34 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { useAuth, type Message } from '@/contexts/AuthContext';
+import { useAuth, type CallSignal, type Message } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { decryptMessage, encryptMessage, getSharedKey } from '@/lib/e2ee';
+import { showIncomingCallNotification } from '@/lib/notifications';
 import { callAuthFunction, supabaseClient } from '@/lib/supabase';
+
+const CALL_EVENT_MIME = 'application/x-privy-call-event';
+
+type CallEventStatus = 'completed' | 'missed' | 'declined' | 'busy';
+
+interface CallEventView {
+  status: CallEventStatus;
+  durationSeconds: number;
+}
 
 interface DecryptedMessage extends Message {
   decryptedText?: string;
   decryptedImageB64?: string;
   decryptedFileData?: { b64: string; name: string; size: number; mimeType: string };
+  callEvent?: CallEventView;
   pending?: boolean;
   failed?: boolean;
 }
 
 const MAX_KEY_POLLS = 5;
+const CHAT_MESSAGE_POLL_MS = 1400;
+const CALL_SIGNAL_POLL_MS = 550;
 
 function formatTime(iso: string): string {
   const d = new Date(iso);
@@ -76,6 +90,50 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function parseCallEvent(raw: string): CallEventView | null {
+  try {
+    const parsed = JSON.parse(raw) as {
+      kind?: string;
+      status?: string;
+      durationSeconds?: number;
+    };
+    if (parsed.kind !== 'call_event') return null;
+    if (parsed.status !== 'completed' && parsed.status !== 'missed' && parsed.status !== 'declined' && parsed.status !== 'busy') return null;
+
+    const durationSeconds = Number.isFinite(Number(parsed.durationSeconds))
+      ? Math.max(0, Math.floor(Number(parsed.durationSeconds)))
+      : 0;
+
+    return {
+      status: parsed.status,
+      durationSeconds,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function callEventTitle(callEvent: CallEventView): string {
+  if (callEvent.status === 'completed') {
+    const mins = Math.floor(callEvent.durationSeconds / 60)
+      .toString()
+      .padStart(2, '0');
+    const secs = (callEvent.durationSeconds % 60).toString().padStart(2, '0');
+    const duration = `${mins}:${secs}`;
+    return callEvent.durationSeconds > 0 ? `Voice call · ${duration}` : 'Voice call';
+  }
+  if (callEvent.status === 'missed') return 'Missed voice call';
+  if (callEvent.status === 'declined') return 'Call declined';
+  return 'User busy';
+}
+
+function callEventIcon(callEvent: CallEventView): string {
+  if (callEvent.status === 'completed') return 'phone-check-outline';
+  if (callEvent.status === 'missed') return 'phone-missed-outline';
+  if (callEvent.status === 'declined') return 'phone-remove-outline';
+  return 'phone-cancel-outline';
 }
 
 function mimeLabel(mime: string): string {
@@ -117,6 +175,12 @@ function matchesPendingDirect(pending: DecryptedMessage, incoming: DecryptedMess
 async function decryptOne(msg: Message, sharedKey: Uint8Array): Promise<DecryptedMessage> {
   try {
     const raw = await decryptMessage(sharedKey, msg.encrypted_body);
+    if (msg.msg_type === 'text' && msg.mime_type === CALL_EVENT_MIME) {
+      const callEvent = parseCallEvent(raw);
+      if (callEvent) {
+        return { ...msg, callEvent, decryptedText: '' };
+      }
+    }
     if (msg.msg_type === 'image') {
       const parsed = JSON.parse(raw) as { b64: string };
       return { ...msg, decryptedImageB64: parsed.b64 };
@@ -155,7 +219,7 @@ function TypingDots({ color }: { color: string }) {
     anim(dot1, 0);
     anim(dot2, 160);
     anim(dot3, 320);
-  }, []);
+  }, [dot1, dot2, dot3]);
   const dot = (a: Animated.Value) => (
     <Animated.View style={[styles.typingDot, { backgroundColor: color, transform: [{ translateY: a }] }]} />
   );
@@ -181,6 +245,27 @@ function Bubble({ msg, isMe, accent, muted, bubble, bubbleMe, textColor, textMe,
   const bg = isMe ? bubbleMe : bubble;
   const tc = isMe ? textMe : textColor;
   const isDeleted = msg.decryptedText === '\u{1F6AB} This message was deleted';
+
+  if (msg.callEvent) {
+    const cardBg = isMe ? bubbleMe : '#ECFEF3';
+    const iconColor = isMe ? '#FFFFFF' : '#047857';
+    const subtitleColor = isMe ? 'rgba(255,255,255,0.78)' : '#065F46';
+
+    return (
+      <View style={[styles.bubbleWrap, isMe ? styles.bubbleRight : styles.bubbleLeft]}>
+        <View style={[styles.callEventCard, { backgroundColor: cardBg }]}> 
+          <View style={styles.callEventHeadRow}>
+            <MaterialCommunityIcons name={callEventIcon(msg.callEvent) as any} size={18} color={iconColor} />
+            <Text style={[styles.callEventTitle, { color: isMe ? '#FFFFFF' : '#064E3B' }]}>{callEventTitle(msg.callEvent)}</Text>
+          </View>
+          <Text style={[styles.callEventSub, { color: subtitleColor }]}>Verified call event</Text>
+          <View style={styles.bubbleFooter}>
+            <Text style={[styles.timeText, { color: isMe ? 'rgba(255,255,255,0.72)' : '#065F46' }]}>{formatMessageTimestamp(msg.created_at)}</Text>
+          </View>
+        </View>
+      </View>
+    );
+  }
 
   if (msg.msg_type === 'file') {
     const mime = msg.decryptedFileData?.mimeType ?? msg.mime_type ?? '';
@@ -356,9 +441,21 @@ const mmStyles = StyleSheet.create({
 
 export default function ChatScreen() {
   const router = useRouter();
+  const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ id: string; peerId: string; peerName: string; peerAvatar: string; peerKey: string }>();
-  const { user, sessionToken, sendMessage: apiSendMessage, getMessages, markRead, deleteMessage, getChats } = useAuth();
+  const {
+    user,
+    sessionToken,
+    sendMessage: apiSendMessage,
+    getMessages,
+    markRead,
+    deleteMessage,
+    getChats,
+    sendCallSignal,
+    getCallSignals,
+    ackCallSignals,
+  } = useAuth();
   const { settings } = useSettings();
   const th = useAppTheme();
   const bg = th.bg;
@@ -406,6 +503,8 @@ export default function ChatScreen() {
   const pendingIdRef = useRef(0);
   const knownMessageIdsRef = useRef<Set<string>>(new Set());
   const latestMessageAtRef = useRef<string | null>(null);
+  const callSignalCursorRef = useRef<string | undefined>(undefined);
+  const incomingPromptRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!params.peerId) return;
@@ -543,7 +642,7 @@ export default function ChatScreen() {
 
     const timer = setInterval(() => {
       poll().catch(() => {});
-    }, 2500);
+    }, CHAT_MESSAGE_POLL_MS);
 
     return () => {
       cancelled = true;
@@ -578,6 +677,133 @@ export default function ChatScreen() {
   const broadcastTyping = useCallback(() => {
     typingChannelRef.current?.send({ type: 'broadcast', event: 'typing', payload: { userId: user?.id } });
   }, [user?.id]);
+
+  const openCallScreen = useCallback((incoming: boolean, callId?: string) => {
+    if (!params.id || !params.peerId) return;
+    router.push({
+      pathname: '/call/[chatId]' as any,
+      params: {
+        chatId: params.id,
+        peerId: params.peerId,
+        peerName: params.peerName,
+        peerAvatar: params.peerAvatar ?? '',
+        peerKey: params.peerKey ?? '',
+        incoming: incoming ? '1' : '0',
+        callId: callId ?? '',
+      },
+    });
+  }, [params.id, params.peerAvatar, params.peerId, params.peerKey, params.peerName, router]);
+
+  const handleStartCall = useCallback(() => {
+    if (!sharedKey) {
+      Alert.alert('Secure channel not ready', 'Wait a moment for key sync, then start the call.');
+      return;
+    }
+    openCallScreen(false);
+  }, [openCallScreen, sharedKey]);
+
+  useEffect(() => {
+    if (!isFocused || !sessionToken || !sharedKey || !params.id || !params.peerId) return;
+    let cancelled = false;
+
+    const showIncomingPrompt = (signal: CallSignal) => {
+      if (incomingPromptRef.current === signal.call_id) return;
+      incomingPromptRef.current = signal.call_id;
+
+      void showIncomingCallNotification({
+        chatId: params.id,
+        callId: signal.call_id,
+        peerId: params.peerId,
+        peerName: displayName,
+        peerAvatar: params.peerAvatar ?? '',
+      });
+
+      Alert.alert(
+        'Incoming secure call',
+        `${displayName} is calling you.`,
+        [
+          {
+            text: 'Decline',
+            style: 'destructive',
+            onPress: () => {
+              void (async () => {
+                try {
+                  await ackCallSignals([signal.id]);
+                  await sendCallSignal(params.id, params.peerId, signal.call_id, 'decline', null);
+                } catch {
+                  // Ignore decline errors and unblock future prompts.
+                } finally {
+                  incomingPromptRef.current = null;
+                }
+              })();
+            },
+          },
+          {
+            text: 'Accept',
+            onPress: () => {
+              openCallScreen(true, signal.call_id);
+            },
+          },
+        ],
+        { cancelable: false },
+      );
+    };
+
+    const pollCallSignals = async () => {
+      try {
+        const options: { since?: string } = {};
+        if (callSignalCursorRef.current) options.since = callSignalCursorRef.current;
+        const signals = await getCallSignals(params.id, options);
+        if (signals.length === 0) return;
+
+        const toAck: string[] = [];
+        for (const signal of signals) {
+          if (!callSignalCursorRef.current || new Date(signal.created_at) > new Date(callSignalCursorRef.current)) {
+            callSignalCursorRef.current = signal.created_at;
+          }
+
+          if (signal.from_user_id !== params.peerId) {
+            toAck.push(signal.id);
+            continue;
+          }
+
+          if (signal.signal_type === 'offer') {
+            showIncomingPrompt(signal);
+            continue;
+          }
+
+          toAck.push(signal.id);
+        }
+
+        if (toAck.length > 0) {
+          await ackCallSignals(toAck);
+        }
+      } catch {
+        // Ignore transient polling failures.
+      }
+    };
+
+    void pollCallSignals();
+    const timer = setInterval(() => {
+      if (!cancelled) void pollCallSignals();
+    }, CALL_SIGNAL_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [
+    ackCallSignals,
+    displayName,
+    getCallSignals,
+    isFocused,
+    openCallScreen,
+    params.id,
+    params.peerId,
+    sendCallSignal,
+    sessionToken,
+    sharedKey,
+  ]);
 
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
@@ -719,7 +945,7 @@ export default function ChatScreen() {
         <Bubble msg={item} isMe={isMe} accent={accent} muted={muted} bubble={bubble} bubbleMe={bubbleMe} textColor={textColor} textMe={textMe} timeColor={subText} onLongPress={(m) => setMenuMsg(m)} onImagePress={(b64) => setViewerImg(b64)} onFilePress={handleFileOpen} />
       </>
     );
-  }, [messages, user?.id, accent, bubble, bubbleMe, textColor, subText, bg, handleFileOpen]);
+  }, [messages, user?.id, accent, muted, bubble, bubbleMe, textColor, subText, bg, handleFileOpen]);
 
   if (keyTimedOut) {
     return (
@@ -808,6 +1034,14 @@ export default function ChatScreen() {
             </Text>
           )}
         </View>
+        <Pressable
+          onPress={handleStartCall}
+          style={[styles.callBtn, { backgroundColor: card, borderColor: border }]}
+          hitSlop={8}
+          disabled={!sharedKey}
+        >
+          <MaterialCommunityIcons name="phone-outline" size={20} color={!sharedKey ? subText : accent} />
+        </Pressable>
         <MaterialCommunityIcons name="lock-outline" size={16} color={subText} style={{ marginRight: 4 }} />
       </View>
 
@@ -931,6 +1165,15 @@ const styles = StyleSheet.create({
   avatarInitial: { fontSize: 16, fontWeight: '700' },
   headerName: { fontSize: 16, fontWeight: '600' },
   headerSub: { fontSize: 11, marginTop: 1 },
+  callBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
   bubbleWrap: { marginVertical: 2 },
   bubbleLeft: { alignItems: 'flex-start' },
   bubbleRight: { alignItems: 'flex-end' },
@@ -955,6 +1198,26 @@ const styles = StyleSheet.create({
   fileNameTxt: { fontSize: 13, fontWeight: '600', lineHeight: 17 },
   fileMetaTxt: { fontSize: 11 },
   fileStatusTxt: { fontSize: 11 },
+  callEventCard: {
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    minWidth: 180,
+    maxWidth: 290,
+  },
+  callEventHeadRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  callEventTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  callEventSub: {
+    fontSize: 11,
+    marginTop: 3,
+  },
   input: { flex: 1, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 10, fontSize: 15, maxHeight: 120 },
   sendBtn: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
   noKeyText: { textAlign: 'center', fontSize: 14, lineHeight: 22, marginHorizontal: 32 },

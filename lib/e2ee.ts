@@ -128,16 +128,18 @@ export async function decryptMessage(
 
 // ─── Key cache ────────────────────────────────────────────────────────────────
 
-const _keyCache = new Map<string, Uint8Array>();
+const _keyCache = new Map<string, { peerPublicKeyB64: string; key: Uint8Array }>();
 
 /**
  * Return (and cache) a shared AES key for a given peer.
  */
 export async function getSharedKey(peerId: string, peerPublicKeyB64: string): Promise<Uint8Array> {
+  const normalizedPeerKey = peerPublicKeyB64.trim();
   const cached = _keyCache.get(peerId);
-  if (cached) return cached;
-  const key = await deriveSharedKey(peerPublicKeyB64);
-  _keyCache.set(peerId, key);
+  if (cached && cached.peerPublicKeyB64 === normalizedPeerKey) return cached.key;
+
+  const key = await deriveSharedKey(normalizedPeerKey);
+  _keyCache.set(peerId, { peerPublicKeyB64: normalizedPeerKey, key });
   return key;
 }
 
